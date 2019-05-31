@@ -156,10 +156,11 @@ static BOOL map_region2(struct uaestate *st, void *addr, void *physaddr, ULONG s
 
 BOOL map_region(struct uaestate *st, void *addr, void *physaddr, ULONG size, BOOL invalid, BOOL writeprotect, BOOL supervisor, UBYTE cachemode)
 {
-	if (addr != physaddr)
+	if (addr != physaddr && st->debug)
 		printf("MMU: Remap %08lx-%08lx -> %08lx (I=%d,WP=%d,S=%d)\n", addr, addr + size - 1, physaddr, invalid, writeprotect, supervisor);
 	if (!map_region2(st, addr, physaddr, size, invalid, writeprotect, supervisor, cachemode)) {
-		printf("MMU: Remap error\n");
+		if (st->debug)
+			printf("MMU: Remap error\n");
 		return FALSE;
 	}
 	return TRUE;
@@ -167,7 +168,8 @@ BOOL map_region(struct uaestate *st, void *addr, void *physaddr, ULONG size, BOO
 
 BOOL unmap_region(struct uaestate *st, void *addr, ULONG size)
 {
-	printf("MMU: Unmapped %08lx-%08lx\n", addr, addr + size - 1);
+	if (st->debug)
+		printf("MMU: Unmapped %08lx-%08lx\n", addr, addr + size - 1);
 	return map_region2(st, addr, NULL, size, TRUE, FALSE, FALSE, 0);
 }
 

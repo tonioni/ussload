@@ -15,6 +15,8 @@ MMU_TABLE = SPRITE_CHUNK+4*8
 	.globl _callinflate
 	.globl _inflate
 	.globl _flushcache
+	.globl _detect060
+	.globl _detect030040
 
 _flushcache:
 	move.l a6,-(sp)
@@ -22,6 +24,68 @@ _flushcache:
 	jsr -0x27c(a6) | CacheClearU
 	move.l (sp)+,a6
 	rts
+
+_detect030040:
+	movem.l a5-a6,-(sp)
+	move.l 4.w,a6
+	lea .super030040(pc),a5
+	jsr -0x1e(a6)
+	movem.l (sp)+,a5-a6
+	rts
+.super030040:
+	or.w #0x700,sr
+	movec vbr,a0
+	movem.l d2/d3,-(sp)
+	move.l sp,a5
+	subq.l #4,sp
+	move.l 0x10(a0),d1
+	move.l 0x2c(a0),d2
+	lea .is68040(pc),a1
+	move.l a1,0x10(a0)
+	lea .atleast030(pc),a1
+	move.l a1,0x2c(a0)
+	btst #2,297(a6)
+	bne.s .atleast030
+	| pmove tt0,(sp)
+	dc.w 0xf017,0x0a00
+	| it is 68030
+	bset #2,297(a6)
+.atleast030:
+	move.b 297(a6),d3
+	or.b #0x4+0x8,297(a6) | AttnFlags (68030 + 68040)
+	| movec CAAR,d0 (68020-68030 only)
+	dc.w 0x4e7a,0x0802
+	| it is not 68040
+	move.b d3,297(a6) | AttnFlags
+.is68040:
+	move.l a5,sp
+	move.l d1,0x10(a0)
+	move.l d2,0x2c(a0)
+	movem.l (sp)+,d2/d3
+	rte
+
+_detect060:
+	movem.l a5-a6,-(sp)
+	move.l 4.w,a6
+	lea .super060(pc),a5
+	jsr -0x1e(a6)
+	movem.l (sp)+,a5-a6
+	rts
+.super060:
+	or.w #0x700,sr
+	movec vbr,a0
+	move.l sp,a5
+	move.l 0x10(a0),d1
+	lea .not68060(pc),a1
+	move.l a1,0x10(a0)
+	| movec PCR,d0
+	dc.w 0x4e7a,0x0808
+	| it is 68060
+	bset #7,297(a6) | AttnFlags
+.not68060:
+	move.l d1,0x10(a0)
+	move.l a5,sp
+	rte
 
 _callinflate:
 	movem.l a4-a5,-(sp)
@@ -50,21 +114,6 @@ _killsystem:
 
 	| debug trigger
 	move.w #0x1234,0xef0006
-
-	| check if 68060
-	move.l 0x10.w,a1
-	btst #2,1(a0)
-	beq.s .not68060
-	moveq #0,d0
-	movec d0,VBR
-	pea .not68060(pc)
-	move.l (sp)+,0x10.w
-	| movec PCR,d0
-	dc.w 0x4e7a,0x0808
-	| it is 68060
-	bset #7,1(a0)
-.not68060:
-	move.l a1,0x10.w
 
 	| CIA: stop timers, clear interrupts
 	bclr #0,0xbfde00

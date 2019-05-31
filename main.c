@@ -425,27 +425,40 @@ static struct Allocation *add_allocation(void *addr, ULONG size, struct uaestate
 	return a;
 }
 
-static ULONG mmu_remap(ULONG addr, ULONG size, BOOL wp, struct uaestate *st)
+static ULONG mmu_remap(ULONG addr, ULONG size, BOOL wp, ULONG alignedphys, struct uaestate *st)
 {
+	void *phys;
+	BOOL alloc = FALSE;
 	if (!st->canusemmu)
 		return 0;
-	void *phys = AllocMem(size + 4095, MEMF_FAST);
-	if (!phys) {
-		printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
-		return 0;
+	if (!alignedphys) {
+		// Fast RAM required, must fail if only chip ram available
+		phys = AllocMem(size + 4095, MEMF_FAST);
+		if (!phys) {
+			printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
+			return 0;
+		}
+		Forbid();
+		FreeMem(phys, size + 4095);
+		alignedphys = (((ULONG)phys) + 4095) & ~4095;
+		phys = AllocAbs(size, (void*)alignedphys);
+		Permit();
+		if (!phys) {
+			printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
+			return 0;
+		}
+		alloc = TRUE;
+	} else {
+		phys = (void*)alignedphys;
 	}
-	Forbid();
-	FreeMem(phys, size + 4095);
-	ULONG alignedphys = (((ULONG)phys) + 4095) & ~4095;
-	phys = AllocAbs(size, (void*)alignedphys);
-	Permit();
-	if (!phys)
-		return 0;
 	if (!map_region(st, (void*)addr, phys, size, FALSE, wp, FALSE, 0)) {
-		FreeMem(phys, size);
+		if (alloc)
+			FreeMem(phys, size);
 		return 0;
 	}
-	add_allocation(phys, size, st);
+	if (alloc) {
+		add_allocation(phys, size, st);
+	}
 	st->mmuused++;
 	return alignedphys;
 }
@@ -727,13 +740,28 @@ static BOOL has_maprom_gvp(struct uaestate *st)
 			ULONG mend = ((((ULONG)mh->mh_Upper) + 0xffff) & 0xffff0000);
 			for (int i = 0; gvpmaprom[i]; i += 2) {
 				if (gvpmaprom[i] == mend) {
-					mrd->type = MAPROM_GVP;
-					mrd->addr = mend - 524288;
-					mrd->config = gvpmaprom[i + 1];
-					mrd->board = cd->cd_BoardAddr + 0x68;
-					// ignore return value, maprom may be already enabled
-					allocate_abs(524288, mrd->addr, st);
-					break;
+					BOOL memok = TRUE;
+					// if Z2 space: make sure it is located in accelerator
+					// board RAM instead of some plain Z2 RAM board.
+					if (mend <= 0xa00000) {
+						memok = FALSE;
+						struct ConfigDev *cd = NULL;
+						while ((cd = (struct ConfigDev*)FindConfigDev((ULONG)cd, 2017, 9))) {
+							if ((APTR)mend == cd->cd_BoardAddr + cd->cd_BoardSize) {
+								memok = TRUE;
+								break;
+							}
+						}
+					}
+					if (memok) {
+						mrd->type = MAPROM_GVP;
+						mrd->addr = mend - 524288;
+						mrd->config = gvpmaprom[i + 1];
+						mrd->board = cd->cd_BoardAddr + 0x68;
+						// ignore return value, maprom may be already enabled
+						allocate_abs(524288, mrd->addr, st);
+						break;
+					}
 				}
 			}
 			mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
@@ -859,7 +887,7 @@ static BOOL has_maprom_mmu(struct uaestate *st)
 		return FALSE;
 	struct mapromdata *mrd = &st->mrd[0];
 	unmap_region(st, (void*)0xf80000, 524288);
-	mrd->addr = mmu_remap(0xf80000, 524288, FALSE, st);
+	mrd->addr = mmu_remap(0xf80000, 524288, FALSE, 0, st);
 	if (mrd->addr) {
 		mrd->type = MAPROM_MMU;
 		return TRUE;
@@ -878,7 +906,7 @@ static BOOL has_maprom(struct uaestate *st)
 			break;
 		if (has_maprom_gvp(st))
 			break;
-		if (!has_maprom_blizzard(st))
+		if (has_maprom_blizzard(st))
 			break;
 		return FALSE;
 	}
@@ -1144,7 +1172,7 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 	while (mh->mh_Node.ln_Succ) {
 		mstart = ((ULONG)mh->mh_Lower) & 0xffff0000;
 		msize = ((((ULONG)mh->mh_Upper) + 0xffff) & 0xffff0000) - mstart;
-		if (mstart == addr) {
+		if (mstart == addr && st->mem_allocated[index] == 0) {
 			if (msize >= size)
 				found = 1;
 			else
@@ -1156,7 +1184,7 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 	Permit();
 	if (!found) {
 		// use MMU to create this address space if available
-		if (mmu_remap(addr, size, FALSE, st)) {
+		if (mmu_remap(addr, size, FALSE, 0, st)) {
 			msize = size;
 			mstart = addr;
 			mh = NULL;
@@ -1189,13 +1217,33 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 		}
 		return 1;
 	}
-	// if too small RAM area and not chip ram: mmu remap the missing part.
+	// if too small RAM area: mmu remap the missing part.
 	if (st->canusemmu) {
+		// if we have 512k chip ram, 512k slow ram and ECS Agnus: create special 0xc00000->0x080000 mapping.
+		volatile struct Custom *c = (volatile struct Custom*)0xdff000;
 		ULONG mmu_start = mstart + msize;
 		ULONG mmu_size = size - msize;
-		if (mmu_remap(mmu_start, mmu_size, FALSE, st)) {
-			printf("- MMU remapped missing address space %08x-%08x\n", mmu_start, mmu_start + mmu_size - 1);
-			if (mstart == 0) {
+		ULONG phys = 0;
+		if (!st->mem_allocated[MB_SLOW] && !mstart && msize == 524288 && mmu_size >= 524288 && (c->vposr & 0x2000)) {
+			// mark c00000 space as allocated
+			Forbid();
+			struct MemHeader *mh = (struct MemHeader*)SysBase->MemList.lh_Head;
+			while (mh->mh_Node.ln_Succ) {
+				mstart = ((ULONG)mh->mh_Lower) & 0xffff0000;
+				if (mstart == 0xc00000) {
+					st->mem_allocated[MB_SLOW] = mh;
+					break;
+				}
+				mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
+			}
+			Permit();
+			printf("- MMU: ECS Agnus 512k to 1M Chip RAM remapping enabled.\n");
+			phys = 0xc00000;
+		}
+		ULONG physout = mmu_remap(mmu_start, mmu_size, FALSE, phys, st);
+		if (physout) {
+			printf("- MMU remapped missing address space %08lx-%08lx -> %08lx\n", mmu_start, mmu_start + mmu_size - 1, physout);
+			if (mstart == 0 && !phys) {
 				printf("- WARNING: Part of Chip RAM remapped, custom chipset can't access it!!\n");
 			}
 			return 1;
@@ -1426,6 +1474,8 @@ static int parse_pass_1(FILE *f, struct uaestate *st)
 extern void runit(void*);
 extern void callinflate(UBYTE*, UBYTE*);
 extern void flushcache(void);
+extern void detect060(void);
+extern void detect030040(void);
 
 static void handlerambank(struct MemoryBank *mb, struct uaestate *st)
 {
@@ -1588,6 +1638,7 @@ int main(int argc, char *argv[])
 		printf("- debug = enable debug output.\n");
 		printf("- test = test mode.\n");
 		printf("- nomaprom = do not use map rom.\n");
+		printf("- mmu = use MMU (If 68030, MMU is not used by default).\n");
 		printf("- nommu = do not use MMU (68030/68040/68060).\n");
 		printf("- nocache = disable caches before starting (68020+)\n");
 		printf("- pal/ntsc = set PAL or NTSC mode (ECS/AGA only)\n");
@@ -1618,6 +1669,8 @@ int main(int argc, char *argv[])
 			st->usemaprom = 0;
 		if (!stricmp(argv[i], "nommu"))
 			st->canusemmu = 0;
+		if (!stricmp(argv[i], "mmu"))
+			st->canusemmu = 2;
 		if (!stricmp(argv[i], "nocache"))
 			st->flags |= FLAGS_NOCACHE;
 		if (!stricmp(argv[i], "pal"))
@@ -1626,8 +1679,20 @@ int main(int argc, char *argv[])
 			st->flags |= FLAGS_FORCENTSC;
 	}
 
-	if (!(SysBase->AttnFlags & AFF_68030))
+	if ((SysBase->AttnFlags & AFF_68020) && !(SysBase->AttnFlags & AFF_68030) && SysBase->LibNode.lib_Version < 37) {
+		detect030040();
+	}
+	if ((SysBase->AttnFlags & AFF_68040) && !(SysBase->AttnFlags & 0x80) && SysBase->LibNode.lib_Version < 46) {
+		detect060();
+	}
+
+	if ((SysBase->AttnFlags & AFF_68030) && !(SysBase->AttnFlags & AFF_68040) && st->canusemmu == 1) {
 		st->canusemmu = 0;
+	}
+
+	if (!(SysBase->AttnFlags & AFF_68030)) {
+		st->canusemmu = 0;
+	}
 
 	if (st->canusemmu) {
 		if (!init_mmu(st)) {
