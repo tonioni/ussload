@@ -2,7 +2,7 @@
 /* Real hardware UAE state file loader */
 /* Copyright 2019 Toni Wilen */
 
-#define VER "2.0 BETA #1"
+#define VER "2.0 BETA #3"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -30,7 +30,7 @@ static const UBYTE *const version = "$VER: ussload " VER " (" REVDATE ")";
 static const char *const chunknames[] =
 {
 	"ASF ",
-	"CPU ", "CHIP", "AGAC",
+	"CPU ", "FPU ", "CHIP", "AGAC",
 	"CIAA", "CIAB", "ROM ",
 	"DSK0", "DSK1", "DSK2", "DSK3",
 	"AUD0", "AUD1", "AUD2", "AUD3",
@@ -326,7 +326,7 @@ void set_custom_final(UBYTE *p)
 	c->intena = 0x7fff;
 	c->intreq = 0x7fff;
 	c->vposw = (getword(p, 4 + 0x04) & 0x8000) | (c->vposr & 7); // set LOF
-	c->dmacon = getword(p, 4 + 0x96) | 0x8000;
+	c->dmacon = (getword(p, 4 + 0x96) & ~15) | 0x8000;
 	c->intena = getword(p, 4 + 0x9a) | 0x8000;
 	c->intreq = getword(p, 4 + 0x9c) | 0x8000;
 }
@@ -1268,6 +1268,31 @@ static void floppy_info(int num, UBYTE *p)
 		printf("<empty>\n");
 }
 
+static void fpu_process(UBYTE *fpu, struct uaestate *st)
+{
+	ULONG *b = (ULONG*)tempmem_allocate(12 * 8 + 3 * 4, st);	
+	if (!b) {
+		st->fpu_chunk = NULL;
+		return;
+	}
+	*((ULONG**)st->fpu_chunk) = b;
+	UWORD *src = (UWORD*)(st->fpu_chunk + 8);
+	UWORD *dst = (UWORD*)b;
+	// convert 10 byte statefile format to 12 byte extended doubled
+	for (int i = 0; i < 8; i++) {
+		*dst++ = *src++;
+		*dst++ = 0;
+		*dst++ = *src++;
+		*dst++ = *src++;
+		*dst++ = *src++;
+		*dst++ = *src++;
+	}
+	// FPU other registers
+	for (int i = 0; i < 3 * 2; i++) {
+		*dst++ = *src++;
+	}
+}
+
 static void check_rom(UBYTE *p, struct uaestate *st)
 {
 	UWORD ver = getword(p, 4 + 4 + 4);
@@ -1331,6 +1356,9 @@ static int parse_pass_2(FILE *f, struct uaestate *st)
 
 		if (!strcmp(cname, "CPU ")) {
 			st->cpu_chunk = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "FPU ")) {
+			st->fpu_chunk = load_chunk(f, cname, size, st);
+			fpu_process(st->fpu_chunk, st);		
 		} else if (!strcmp(cname, "CHIP")) {
 			st->custom_chunk = load_chunk(f, cname, size, st);
 		} else if (!strcmp(cname, "AGAC")) {
@@ -1408,9 +1436,22 @@ static int parse_pass_1(FILE *f, struct uaestate *st)
 			if (smodel != model) {
 				printf("- WARNING: %lu CPU statefile but system has %lu CPU.\n", model, smodel);
 			}
-			if (model > 68030) {
-				printf("- ERROR: Only 68000/68010/68020/68030 statefiles are supported.\n");
+		} else if(!strcmp(cname, "FPU ")) {
+			ULONG model = getlong(b, 0);
+			ULONG smodel = 0;
+			if (SysBase->AttnFlags & AFF_68882)
+				smodel = 68882;
+			else if (SysBase->AttnFlags & AFF_68881)
+				smodel = 68881;
+			if (SysBase->AttnFlags & 0x80)
+				smodel = 68060;
+			else if (SysBase->AttnFlags & AFF_68040)
+				smodel = 68040;
+			if (model && !smodel) {
+				printf("- ERROR: FPU required\n");
 				st->errors++;
+			} else if (model != smodel) {
+				printf("- WARNING: %lu FPU statefile but system has %lu FPU.\n", model, smodel);
 			}
 		} else if (!strcmp(cname, "CHIP")) {
 			UWORD vposr = getword(b, 4 + 4); // VPOSR
@@ -1476,6 +1517,7 @@ extern void callinflate(UBYTE*, UBYTE*);
 extern void flushcache(void);
 extern void detect060(void);
 extern void detect030040(void);
+extern UWORD detectmmu(void);
 
 static void handlerambank(struct MemoryBank *mb, struct uaestate *st)
 {
@@ -1641,6 +1683,7 @@ int main(int argc, char *argv[])
 		printf("- mmu = use MMU (If 68030, MMU is not used by default).\n");
 		printf("- nommu = do not use MMU (68030/68040/68060).\n");
 		printf("- nocache = disable caches before starting (68020+)\n");
+		printf("- pause = restore state, wait left mouse button press\n");
 		printf("- pal/ntsc = set PAL or NTSC mode (ECS/AGA only)\n");
 		return 0;
 	}
@@ -1677,27 +1720,39 @@ int main(int argc, char *argv[])
 			st->flags |= FLAGS_FORCEPAL;
 		if (!stricmp(argv[i], "ntsc"))
 			st->flags |= FLAGS_FORCENTSC;
+		if (!stricmp(argv[i], "pause"))
+			st->flags |= FLAGS_PAUSE;
 	}
 
 	if ((SysBase->AttnFlags & AFF_68020) && !(SysBase->AttnFlags & AFF_68030) && SysBase->LibNode.lib_Version < 37) {
 		detect030040();
 	}
-	if ((SysBase->AttnFlags & AFF_68040) && !(SysBase->AttnFlags & 0x80) && SysBase->LibNode.lib_Version < 46) {
+	if ((SysBase->AttnFlags & AFF_68040) && !(SysBase->AttnFlags & 0x80) && SysBase->LibNode.lib_Version < 45) {
 		detect060();
 	}
+	
+	UWORD attnFlags = SysBase->AttnFlags;
 
-	if ((SysBase->AttnFlags & AFF_68030) && !(SysBase->AttnFlags & AFF_68040) && st->canusemmu == 1) {
+	if ((attnFlags & AFF_68030) && !(attnFlags & AFF_68040) && st->canusemmu == 1) {
 		st->canusemmu = 0;
 	}
 
-	if (!(SysBase->AttnFlags & AFF_68030)) {
+	if (!(attnFlags & AFF_68030)) {
 		st->canusemmu = 0;
 	}
 
-	if (st->canusemmu) {
+	if (st->canusemmu && (attnFlags & AFF_68040)) {
+		if (!(detectmmu() & 0xc000)) {
+			st->canusemmu = 0;
+		}
+	}
+	
+	if (st->canusemmu) {	
 		if (!init_mmu(st)) {
 			printf("ERROR: MMU page table allocation failed.\n");
 			st->canusemmu = 0;
+		} else {
+			printf("MMU mode enabled.\n");
 		}
 	}
 

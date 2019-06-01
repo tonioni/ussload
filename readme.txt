@@ -1,9 +1,9 @@
 
 ussload is UAE state save file (*.uss) loader designed for real hardware.
 
-v2.0 beta 1:
+v2.0:
 
-- MMU support (68030, 68040 and 68060)
+- MMU memory and ROM translation support (68030, 68040 and 68060)
 - GVP MapROM support added. GVP A530 and most A2000 and A3000 GVP boards.
 - Blizzard 1230 MKI/II/III/IV, 1240, 1260 MapROM support added.
 - ACA1233n MapROM support added, in both 68030 and 68EC020 modes.
@@ -11,8 +11,11 @@ v2.0 beta 1:
 - Switch off all floppy drive motors before memory decompression.
 - Fixed crash if 68020 or 68030 statefile was loaded and CPU was
   68040 or 68060.
-- Fixed uncompressed statefile support.
+- Fixed uncompressed state file support.
 - Load also Kickstart files from current directory.
+- 68040 and 68060 state files supported (MMU registers are not restored)
+- FPU state file support added.
+- Pause mode. Restores state, enables display, waits for mouse button.
 - Compatibility improved.
 
 
@@ -38,14 +41,14 @@ Information:
 - State file restore can for example fail if state file was saved when
   blitter was active or program was executing self-modifying code.
 
-Minimum RAM config examples (without MMU)
+Minimum RAM config examples (without MMU):
 
 512k Chip RAM state file: hardware must have 1M Chip or 512k Chip+512k
 "Slow" RAM or 512k Chip+512k real Fast.
 512k+512k state file: hardware must have 1M+512k or 512k+1M or
 512k+512k+512k real Fast.
 
-If MMU is available, every fully or partially missing RAM address space
+If MMU is available, fully or partially missing RAM address space
 is created with MMU. MMU is also used for Map ROM.
 
 Note that uncompressed state files require at least 1M contiguous extra
@@ -59,8 +62,10 @@ ACA500, ACA500plus, ACA1221, ACA1221EC and most ACA123x variants.
 GVP A530, A2000 and A3000 G-Force models.
 Blizzard 1230 MKI/MKII/MKIII/MKIV, 1240, 1260.
 
+Map ROM hardware is not used or needed if MMU is enabled.
+
 If state file ROM is not same as hardware ROM, ROM image is automatically
-loaded from DEVS:Kickstarts and current directory.
+loaded from DEVS:Kickstarts or from current directory.
 Check WHDLoad documentation for DEVS:Kickstarts files and naming.
 If A1200 KS 3.0 ROM is missing: manually copy correct ROM to
 DEVS:Kickstarts and name it kick39106.a1200.
@@ -72,7 +77,9 @@ Command line parameters:
 - test = parse and load state file, exit before system take over.
 - nomaprom = do not use Map ROM.
 - nommu = do not use MMU.
+- mmu = use mmu (If CPU is 68030, MMU is not used automatically)
 - nocache = disable caches before starting loaded program (68020+ only)
+- pause = restore state, wait left mouse button press.
 - pal = force PAL mode (ECS/AGA only)
 - ntsc = force NTSC mode (ECS/AGA only)
 
@@ -85,4 +92,3 @@ Background colors:
 - yellow = configuring floppy drives (seek rw head, motor state).
 
 Source: https://github.com/tonioni/ussload
-

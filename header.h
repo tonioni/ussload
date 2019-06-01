@@ -39,6 +39,7 @@ struct MemoryBank
 #define FLAGS_NOCACHE 1
 #define FLAGS_FORCEPAL 2
 #define FLAGS_FORCENTSC 4
+#define FLAGS_PAUSE 8
 
 struct mapromdata
 {
@@ -53,6 +54,7 @@ struct uaestate
 {
 	ULONG flags;
 	UBYTE *cpu_chunk;
+	UBYTE *fpu_chunk;
 	UBYTE *ciaa_chunk, *ciab_chunk;
 	UBYTE *custom_chunk;
 	UBYTE *aga_colors_chunk;

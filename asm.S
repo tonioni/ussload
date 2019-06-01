@@ -1,6 +1,7 @@
 
 CPU_CHUNK = 4
-CIAA_CHUNK = CPU_CHUNK+4
+FPU_CHUNK = CPU_CHUNK+4
+CIAA_CHUNK = FPU_CHUNK+4
 CIAB_CHUNK = CIAA_CHUNK+4
 CUSTOM_CHUNK = CIAB_CHUNK+4
 AGA_COLORS_CHUNK = CUSTOM_CHUNK+4
@@ -17,6 +18,7 @@ MMU_TABLE = SPRITE_CHUNK+4*8
 	.globl _flushcache
 	.globl _detect060
 	.globl _detect030040
+	.globl _detectmmu
 
 _flushcache:
 	move.l a6,-(sp)
@@ -87,6 +89,28 @@ _detect060:
 	move.l a5,sp
 	rte
 
+_detectmmu:
+	movem.l a5-a6,-(sp)
+	move.l 4.w,a6
+	lea .supermmu(pc),a5
+	jsr -0x1e(a6)
+	movem.l (sp)+,a5-a6
+	rts
+.supermmu:
+	or.w #0x700,sr
+	movec tc,d0
+	btst #15,d0
+	bne.s .done
+	move.w d0,d1
+	or.w #0x4000,d0
+	movec d0,tc
+	movec tc,d0
+	btst #14,d0
+	beq.s .done
+	movec d1,tc
+.done:
+	rte
+
 _callinflate:
 	movem.l a4-a5,-(sp)
 	move.l 4+2*4(sp),a4
@@ -113,7 +137,7 @@ _killsystem:
 	move.l d0,a0
 
 	| debug trigger
-	move.w #0x1234,0xef0006
+	| move.w #0x1234,0xef0006
 
 	| CIA: stop timers, clear interrupts
 	bclr #0,0xbfde00
@@ -147,7 +171,39 @@ _runit:
 	subq.l #8,sp
 	lea 0xdff000,a6
 	
-| find last line
+	| debug trigger
+	| move.w #0x1234,0xef000a
+
+	| restore FPU
+	move.l FPU_CHUNK(a4),d0
+	beq.s .nofpu
+	move.l d0,a0
+	| system has FPU?
+	move.w (a4),d1
+	btst #4,d1
+	beq.s .nofpu
+	clr.l -(sp)
+	| FPU -> NULL state
+	frestore (sp)+
+	btst #6,4(a0) | flag bit 30 (=old FPU state)
+	bne.s .oldfpustate
+	btst #5,4(a0) | flag bit 29 (=new FPU state)
+	beq.s .loadfpu
+	btst #0,4+8*10+4+4+4+4+4+3(a0)
+	beq.s .nofpu
+	bra.s .loadfpu
+.oldfpustate:
+	btst #0,4+3(a0) | flag bit 0: 1 = NULL
+	bne.s .nofpu	
+.loadfpu:
+	move.l (a0),a0 | model points to pre-processed data
+	fmovem.x (a0)+,fp0-fp7
+	fmove.l (a0)+,fpcr
+	fmove.l (a0)+,fpsr
+	fmove.l (a0)+,fpiar
+.nofpu:	
+	
+	| find last line
 	moveq #0,d5
 	lea 0x6(a6),a2
 .wait1:
@@ -176,27 +232,16 @@ _runit:
 	bne.s .wait3
 
 	| debug trigger
-	move.w #0x1234,0xef0004
+	| move.w #0x1234,0xef0004
 
-	move.l CUSTOM_CHUNK(a4),a0
-	move.w 4+0x96(a0),d0 | DMACON
-	and.w #15,d0
-	or.w #0x8200,d0
-	| enable audio DMA
-	move.w d0,0x96(a6)
-
-	| wait few lines, enough time for audio channels to enter normal 2/3 states
-	addq.b #4,d5
-.wait4:
-	cmp.b (a2),d5
-	bne.s .wait4
-	| restore latched AUDxLEN and AUDxPT
-	move.l a4,(sp)
-	bsr _set_audio_final
+ 	| don't play annoying sounds if pause
+	btst #3,3(a4)
+	bne.s .pausemode1
+	bsr begin_audio
+.pausemode1:
 
 	| restore possible side-effect causing
 	| custom bits as late as possible
-
 	move.l CIAA_CHUNK(a4),(sp)
 	clr.l 4(sp)
 	bsr _set_cia_final
@@ -206,32 +251,58 @@ _runit:
 	move.l CUSTOM_CHUNK(a4),(sp)
 	bsr _set_custom_final
 
+	| pause
+	btst #3,3(a4)
+	beq.s .pausemode2
+.pausemode3:
+	btst #6,0xbfe001
+	bne.s .pausemode3
+	| debounce delay
+.pausemode4:
+	cmp.b 6(a6),d5
+	bne.s .pausemode4
+	subq.b #1,d5
+.pausemode5:
+	cmp.b 6(a6),d5
+	bne.s .pausemode5
+	addq.b #1,d5
+	btst #6,0xbfe001
+	beq.s .pausemode4
+	bsr begin_audio	
+.pausemode2:
+
 	| restore CPU state
 	move.w (a4),d1
 	move.l CPU_CHUNK(a4),a0
+	| stack pointers
 	move.l 4+4+60+4+2+2+4(a0),SP
 	move.l 4+4+60+4+2+2(a0),a1 | USP
 	move.l a1,USP
+
+.cpu68020:
+	| 68020 (or higher)
 	cmp.l #68020,(a0)
 	bcs.s .cpu68010
 	btst #1,d1
 	beq.s .cpu68010
-	lea 4+4+60+4+2+2+4+4+2+4+4+4+4(a0),a1
-	| CAAR is 68020/030 only
+	lea 4+4+60+4+2+2+4+4+2+4+(4+4+4)(a0),a1
 	move.l (a1)+,d0
 	btst #3,d1
-	bne.s .cpu68040
+	bne.s .cpu68020_040
+	| CAAR is 68020-68030 only. Skip if 68040+
 	| movec d0,CAAR
 	dc.w 0x4e7b,0x0802
-.cpu68040:
+.cpu68020_040:
 	move.l (a1)+,d0
 	movec d0,CACR
-	| MSP is 68020-68040 only
 	move.l (a1)+,d0
 	btst #7,d1
 	bne.s .cpu68010
+	| MSP is 68020-68040 only. Skip if 68060.
 	movec d0,MSP
 .cpu68010:
+
+	| 68010 (or higher)
 	cmp.l #68010,(a0)
 	bcs.s .cpu68000
 	btst #0,d1
@@ -244,6 +315,7 @@ _runit:
 	move.l (a1)+,d0
 	movec d0,VBR
 .cpu68000:
+
 	btst #0,d1
 	beq.s .nocpu68010
 	btst #1,d1
@@ -253,9 +325,11 @@ _runit:
 	moveq #0,d0
 	movec d0,CACR
 .nocpu68020:
+	| 68010+ stack frame fix
 	move.w #0x0020,-(sp) | Format 0, Trap #0
 .nocpu68010:
 
+	| prepare CIA timer control values
 	move.l CIAA_CHUNK(a4),a1
 	move.b 15(a1),d6
 	swap d6
@@ -265,6 +339,7 @@ _runit:
 	swap d7
 	move.b 14(a1),d7
 
+	| PC, SR, registers
 	move.l 4+4+60(a0),-(sp) | PC
 	move.w 4+4+60+4+2+2+4+4(a0),-(sp) | SR
 	movem.l 4+4(a0),d0-d5
@@ -272,7 +347,7 @@ _runit:
 	add.w #4+4+6*4,a0
 
 	| debug trigger
-	move.w #0x1234,0xef0000
+	| move.w #0x1234,0xef0000
 
 	lea 0xbfde00,a1
 
@@ -289,6 +364,7 @@ _runit:
 	swap d7
 	move.b d7,0x100(a1)
 	
+	| restore remaining registers
 	movem.l (a0),d6-d7/a0-a1
 	
 	rte | GO! GO! GO!
@@ -298,7 +374,7 @@ mmu_enable:
 	move.l d0,a2
 
 	| debug trigger
-	move.w #0x1234,0xef0008
+	| move.w #0x1234,0xef0008
 
 	move.l MMU_TABLE(a2),d2
 	beq.s .mmuend
@@ -347,4 +423,22 @@ mmu_enable:
 
 .mmuend:
 	movem.l (sp)+,d0-d2/a0-a2
+	rts
+
+begin_audio:
+	move.l CUSTOM_CHUNK(a4),a0
+	move.w 4+0x96(a0),d0 | DMACON
+	and.w #15,d0
+	or.w #0x8200,d0
+	| enable audio DMA
+	move.w d0,0x96(a6)
+	| wait few lines, enough time for audio channels to enter normal 2/3 states
+	addq.b #4,d5
+.audwait:
+	cmp.b (a2),d5
+	bne.s .audwait
+	| restore latched AUDxLEN and AUDxPT
+	move.l a4,-(sp)
+	bsr _set_audio_final
+	addq.l #4,sp
 	rts
