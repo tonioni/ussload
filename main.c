@@ -134,11 +134,14 @@ static void reset_floppy(struct uaestate *st)
 	ciab->ciaprb |= 15 << 3;
 }
 
-static void set_floppy(UBYTE *p, ULONG num)
+static void set_floppy(UBYTE *p, ULONG num, struct uaestate *st)
 {
 	ULONG id = getlong(p, 0);
 	UBYTE state = p[4];
 	UBYTE track = p[5];
+
+	if (st->flags & FLAGS_NOFLOPPY)
+		return;
 
  	// drive disabled?
 	if (state & 2)
@@ -1563,7 +1566,7 @@ static void processstate(struct uaestate *st)
 		
 	// must be before set_cia
 	for (int i = 0; i < 4; i++) {
-		set_floppy(st->floppy_chunk[i], i);
+		set_floppy(st->floppy_chunk[i], i, st);
 	}
 
 	c->color[0] = 0x444;
@@ -1683,8 +1686,10 @@ int main(int argc, char *argv[])
 		printf("- mmu = use MMU (If 68030, MMU is not used by default).\n");
 		printf("- nommu = do not use MMU (68030/68040/68060).\n");
 		printf("- nocache = disable caches before starting (68020+)\n");
+		printf("- nocache2 = disable caches when taking over the system (68020+)\n");
 		printf("- pause = restore state, wait left mouse button press\n");
 		printf("- pal/ntsc = set PAL or NTSC mode (ECS/AGA only)\n");
+		printf("- nofloppy = don't initialize floppy drives\n");
 		return 0;
 	}
 	
@@ -1716,12 +1721,16 @@ int main(int argc, char *argv[])
 			st->canusemmu = 2;
 		if (!stricmp(argv[i], "nocache"))
 			st->flags |= FLAGS_NOCACHE;
+		if (!stricmp(argv[i], "nocache2"))
+			st->flags |= FLAGS_NOCACHE2;
 		if (!stricmp(argv[i], "pal"))
 			st->flags |= FLAGS_FORCEPAL;
 		if (!stricmp(argv[i], "ntsc"))
 			st->flags |= FLAGS_FORCENTSC;
 		if (!stricmp(argv[i], "pause"))
 			st->flags |= FLAGS_PAUSE;
+		if (!stricmp(argv[i], "nofloppy"))
+			st->flags |= FLAGS_NOFLOPPY;
 	}
 
 	if ((SysBase->AttnFlags & AFF_68020) && !(SysBase->AttnFlags & AFF_68030) && SysBase->LibNode.lib_Version < 37) {
@@ -1745,6 +1754,10 @@ int main(int argc, char *argv[])
 		if (!(detectmmu() & 0xc000)) {
 			st->canusemmu = 0;
 		}
+	}
+	
+	if (!(attnFlags & AFF_68020)) {
+		st->flags &= ~(FLAGS_NOCACHE | FLAGS_NOCACHE2);
 	}
 	
 	if (st->canusemmu) {	

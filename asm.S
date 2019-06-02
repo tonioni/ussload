@@ -28,6 +28,7 @@ _flushcache:
 	rts
 
 _detect030040:
+	.arch 68030
 	movem.l a5-a6,-(sp)
 	move.l 4.w,a6
 	lea .super030040(pc),a5
@@ -48,15 +49,13 @@ _detect030040:
 	move.l a1,0x2c(a0)
 	btst #2,297(a6)
 	bne.s .atleast030
-	| pmove tt0,(sp)
-	dc.w 0xf017,0x0a00
+	pmove tt0,(sp)
 	| it is 68030
 	bset #2,297(a6)
 .atleast030:
 	move.b 297(a6),d3
 	or.b #0x4+0x8,297(a6) | AttnFlags (68030 + 68040)
-	| movec CAAR,d0 (68020-68030 only)
-	dc.w 0x4e7a,0x0802
+	movec CAAR,d0 | (68020-68030 only)
 	| it is not 68040
 	move.b d3,297(a6) | AttnFlags
 .is68040:
@@ -65,6 +64,7 @@ _detect030040:
 	move.l d2,0x2c(a0)
 	movem.l (sp)+,d2/d3
 	rte
+	.arch 68040
 
 _detect060:
 	movem.l a5-a6,-(sp)
@@ -80,8 +80,9 @@ _detect060:
 	move.l 0x10(a0),d1
 	lea .not68060(pc),a1
 	move.l a1,0x10(a0)
-	| movec PCR,d0
-	dc.w 0x4e7a,0x0808
+	.arch 68060
+	movec PCR,d0
+	.arch 68040
 	| it is 68060
 	bset #7,297(a6) | AttnFlags
 .not68060:
@@ -156,6 +157,12 @@ _killsystem:
 	move.w d0,0x9c(a0)
 	move.w d0,0x9e(a0)
 	move.l d1,a0
+	
+	btst #4,3(a0)
+	beq.s .nocache2
+	moveq #0,d0
+	movec d0,cacr
+.nocache2:
 	
 	move.l 8(a0),d0
 	bsr.w mmu_enable
@@ -279,6 +286,8 @@ _runit:
 	move.l 4+4+60+4+2+2(a0),a1 | USP
 	move.l a1,USP
 
+	.arch 68030
+
 .cpu68020:
 	| 68020 (or higher)
 	cmp.l #68020,(a0)
@@ -290,8 +299,7 @@ _runit:
 	btst #3,d1
 	bne.s .cpu68020_040
 	| CAAR is 68020-68030 only. Skip if 68040+
-	| movec d0,CAAR
-	dc.w 0x4e7b,0x0802
+	movec d0,CAAR
 .cpu68020_040:
 	move.l (a1)+,d0
 	movec d0,CACR
@@ -301,6 +309,8 @@ _runit:
 	| MSP is 68020-68040 only. Skip if 68060.
 	movec d0,MSP
 .cpu68010:
+
+	.arch 68040
 
 	| 68010 (or higher)
 	cmp.l #68010,(a0)
@@ -403,23 +413,22 @@ mmu_enable:
 	btst #2,d1
 	beq.s .mmuend
 
+	.arch 68030
+
 	sub.w #12,sp
 	move.l #0x00c07760,(sp)
-	| pmove (sp),tc
-	dc.w 0xf017,0x4000
+	pmove (sp),tc
 	move.l #0x80000002,4(sp)
 	move.l d2,8(sp)
-	| pmove 4(sp),crp
-	dc.w 0xf02f,0x4c00,0x0004
+	pmove 4(sp),crp
 	bset #7,(sp)
-	| pmove (sp),tc
-	dc.w 0xf017,0x4000
+	pmove (sp),tc
 	clr.l (sp)
-	| pmove (sp),tt0
-	dc.w 0xf017,0x0800
-	| pmove (sp),tt1
-	dc.w 0xf017,0x0c00
+	pmove (sp),tt0
+	pmove (sp),tt1
 	add.w #12,sp
+
+	.arch 68040
 
 .mmuend:
 	movem.l (sp)+,d0-d2/a0-a2

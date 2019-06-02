@@ -40,6 +40,8 @@ struct MemoryBank
 #define FLAGS_FORCEPAL 2
 #define FLAGS_FORCENTSC 4
 #define FLAGS_PAUSE 8
+#define FLAGS_NOCACHE2 16
+#define FLAGS_NOFLOPPY 32
 
 struct mapromdata
 {

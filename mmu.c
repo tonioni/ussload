@@ -180,10 +180,12 @@ BOOL init_mmu(struct uaestate *st)
 		return FALSE;
 		st->mmutype = MMU030;
 	if (SysBase->AttnFlags & AFF_68040)	
-		st->mmutype = MMU040;
+		st->mmutype = MMU040; // or 68060
 	if (st->mmutype >= MMU040)
 		map_pagetable(st, st->MMU_Level_A, 1 << PAGE_SIZE);
-		
+	
+	
+	UBYTE cachemode = (st->flags & (FLAGS_NOCACHE | FLAGS_NOCACHE2)) ? CM_NONCACHEABLE : CM_WRITETHROUGH;
 	// Create default 1:1 mapping
 	
 	// memory
@@ -192,7 +194,7 @@ BOOL init_mmu(struct uaestate *st)
 	while (mh->mh_Node.ln_Succ) {
 		ULONG mstart = ((ULONG)mh->mh_Lower) & 0xffff0000;
 		ULONG msize = ((((ULONG)mh->mh_Upper) + 0xffff) & 0xffff0000) - mstart;
-		map_region(st, (void*)mstart, (void*)mstart, msize, FALSE, FALSE, FALSE, CM_WRITETHROUGH);
+		map_region(st, (void*)mstart, (void*)mstart, msize, FALSE, FALSE, FALSE, cachemode);
 		mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
 	}
 	Permit();
@@ -201,8 +203,8 @@ BOOL init_mmu(struct uaestate *st)
 	map_region(st, (void*)0xd80000, (void*)0xd80000, 0xe00000 - 0xd80000, FALSE, FALSE, FALSE, CM_NONCACHEABLE);
 	map_region(st, (void*)0xe80000, (void*)0xe80000, 0x080000, FALSE, FALSE, FALSE, CM_NONCACHEABLE);
 	// rom
-	map_region(st, (void*)0xe00000, (void*)0xe00000, 0x080000, FALSE, FALSE, FALSE, 0);
-	map_region(st, (void*)0xf80000, (void*)0xf80000, 0x080000, FALSE, FALSE, FALSE, 0);
+	map_region(st, (void*)0xe00000, (void*)0xe00000, 0x080000, FALSE, FALSE, FALSE, cachemode);
+	map_region(st, (void*)0xf80000, (void*)0xf80000, 0x080000, FALSE, FALSE, FALSE, cachemode);
 		
 	return TRUE;
 }
