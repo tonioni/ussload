@@ -2,7 +2,7 @@
 /* Real hardware UAE state file loader */
 /* Copyright 2019 Toni Wilen */
 
-#define VER "2.0 BETA #3"
+#define VER "2.0 BETA #5"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -34,6 +34,8 @@ static const char *const chunknames[] =
 	"CIAA", "CIAB", "ROM ",
 	"DSK0", "DSK1", "DSK2", "DSK3",
 	"AUD0", "AUD1", "AUD2", "AUD3",
+	"SPR0", "SPR1", "SPR2", "SPR3",
+	"SPR4", "SPR5", "SPR6", "SPR7",
 	"END ",
 	NULL
 };
@@ -140,7 +142,7 @@ static void set_floppy(UBYTE *p, ULONG num, struct uaestate *st)
 	UBYTE state = p[4];
 	UBYTE track = p[5];
 
-	if (st->flags & FLAGS_NOFLOPPY)
+	if ((st->flags & FLAGS_NOFLOPPY) || !p)
 		return;
 
  	// drive disabled?
@@ -191,6 +193,10 @@ static void set_audio(UBYTE *p, ULONG num)
 {
 	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
 	ULONG l;
+
+	if (!p)
+		return;
+
 	c->aud[num].ac_vol = p[1]; // AUDxVOL
 	c->aud[num].ac_per = getword(p, 1 + 1 + 1 + 1 + 2 + 2 + 2); // AUDxPER
 	c->aud[num].ac_len = getword(p, 1 + 1 + 1 + 1 + 2); // AUDxLEN
@@ -205,11 +211,13 @@ void set_audio_final(struct uaestate *st)
 	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
 	for (UWORD num = 0; num < 4; num++) {
 		UBYTE *p = st->audio_chunk[num];
-		ULONG l;
-		c->aud[num].ac_len = getword(p, 1 + 1 + 1 + 1); // AUDxLEN
-		l = getword(p, 1 + 1 + 1 + 1 + 2 + 2 + 2 + 2) << 16; // AUDxLCH
-		l |= getword(p, 1 + 1 + 1 + 1 + 2 + 2 + 2 + 2 + 2); // AUDxLCL
-		c->aud[num].ac_ptr = (UWORD*)l;
+		if (p) {
+			ULONG l;
+			c->aud[num].ac_len = getword(p, 1 + 1 + 1 + 1); // AUDxLEN
+			l = getword(p, 1 + 1 + 1 + 1 + 2 + 2 + 2 + 2) << 16; // AUDxLCH
+			l |= getword(p, 1 + 1 + 1 + 1 + 2 + 2 + 2 + 2 + 2); // AUDxLCL
+			c->aud[num].ac_ptr = (UWORD*)l;
+		}
 	}
 }
 
@@ -217,6 +225,9 @@ static void set_sprite(UBYTE *p, ULONG num)
 {
 	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
 	ULONG l;
+	
+	if (!p)
+		return;
 	
 	l = getword(p, 0) << 16; // SPRxPTH
 	l |= getword(p, 2); // SPRxPTL
@@ -1261,7 +1272,7 @@ static void floppy_info(int num, UBYTE *p)
 {
 	UBYTE state = p[4];
 	UBYTE track = p[5];
-	if (state & 2) // disabled
+	if ((state & 2) || !p) // disabled
 		return;
 	UBYTE *path = &p[4 + 1 + 1 + 1 + 1 + 4 + 4];
 	printf("DF%d: Track %d ", num, track);
@@ -1390,6 +1401,22 @@ static int parse_pass_2(FILE *f, struct uaestate *st)
 			st->audio_chunk[2] = load_chunk(f, cname, size, st);
 		} else if (!strcmp(cname, "AUD3")) {
 			st->audio_chunk[3] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR0")) {
+			st->sprite_chunk[0] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR1")) {
+			st->sprite_chunk[1] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR2")) {
+			st->sprite_chunk[2] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR3")) {
+			st->sprite_chunk[3] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR4")) {
+			st->sprite_chunk[4] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR5")) {
+			st->sprite_chunk[5] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR6")) {
+			st->sprite_chunk[6] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "SPR7")) {
+			st->sprite_chunk[7] = load_chunk(f, cname, size, st);
 		} else {
 			fseek(f, size, SEEK_CUR);
 			fseek(f, 4 - (size & 3), SEEK_CUR);

@@ -158,7 +158,8 @@ _killsystem:
 	move.w d0,0x9e(a0)
 	move.l d1,a0
 	
-	btst #4,3(a0)
+	move.l 8(a0),a1
+	btst #4,3(a1)
 	beq.s .nocache2
 	moveq #0,d0
 	movec d0,cacr
