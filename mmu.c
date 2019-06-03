@@ -62,22 +62,12 @@ static ULONG alloc_descriptor(struct uaestate *st, UBYTE bits, UBYTE level)
 		st->page_free -= 0x100;
 	}
 	while (st->page_free < size) {
-		/* allocate in aligned blocks of PAGE_SIZE */
-		UBYTE *mem, *newmem, *pagemem;
-
- 		// by design fail if no FAST RAM available
-		mem = AllocMem(2 * ps, MEMF_FAST);
-		if (!mem)
-				return 0;
-		Forbid();
-		FreeMem(mem, 2 * ps);
-		newmem = (UBYTE*)((((ULONG)mem) + ps - 1) & ~(ps - 1));
-		pagemem = allocate_abs(ps, (ULONG)newmem, st);
-		Permit();
+		ULONG allocsize = ps * 8;
+		UBYTE *pagemem = extra_allocate(allocsize, ps, st);
 		if (!pagemem)
 				return 0;
 		st->page_ptr = pagemem;
-		st->page_free = ps;
+		st->page_free = allocsize;
 		if (level > 0 && st->mmutype >= MMU040)
 			map_pagetable(st, pagemem, ps);
 	}
@@ -183,7 +173,6 @@ BOOL init_mmu(struct uaestate *st)
 		st->mmutype = MMU040; // or 68060
 	if (st->mmutype >= MMU040)
 		map_pagetable(st, st->MMU_Level_A, 1 << PAGE_SIZE);
-	
 	
 	UBYTE cachemode = (st->flags & (FLAGS_NOCACHE | FLAGS_NOCACHE2)) ? CM_NONCACHEABLE : CM_WRITETHROUGH;
 	// Create default 1:1 mapping

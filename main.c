@@ -2,7 +2,7 @@
 /* Real hardware UAE state file loader */
 /* Copyright 2019 Toni Wilen */
 
-#define VER "2.0 BETA #5"
+#define VER "2.0 BETA #6"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -417,7 +417,7 @@ void set_cia_final(UBYTE *p, ULONG num)
 
 static void free_allocations(struct uaestate *st)
 {
-	for (int i = st->num_allocations - 1; i >= 0; i--) {
+	for (WORD i = st->num_allocations - 1; i >= 0; i--) {
 		struct Allocation *a = &st->allocations[i];
 		if (a->mh) {
 			Deallocate(a->mh, a->addr, a->size);		
@@ -439,45 +439,7 @@ static struct Allocation *add_allocation(void *addr, ULONG size, struct uaestate
 	return a;
 }
 
-static ULONG mmu_remap(ULONG addr, ULONG size, BOOL wp, ULONG alignedphys, struct uaestate *st)
-{
-	void *phys;
-	BOOL alloc = FALSE;
-	if (!st->canusemmu)
-		return 0;
-	if (!alignedphys) {
-		// Fast RAM required, must fail if only chip ram available
-		phys = AllocMem(size + 4095, MEMF_FAST);
-		if (!phys) {
-			printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
-			return 0;
-		}
-		Forbid();
-		FreeMem(phys, size + 4095);
-		alignedphys = (((ULONG)phys) + 4095) & ~4095;
-		phys = AllocAbs(size, (void*)alignedphys);
-		Permit();
-		if (!phys) {
-			printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
-			return 0;
-		}
-		alloc = TRUE;
-	} else {
-		phys = (void*)alignedphys;
-	}
-	if (!map_region(st, (void*)addr, phys, size, FALSE, wp, FALSE, 0)) {
-		if (alloc)
-			FreeMem(phys, size);
-		return 0;
-	}
-	if (alloc) {
-		add_allocation(phys, size, st);
-	}
-	st->mmuused++;
-	return alignedphys;
-}
-
-UBYTE *allocate_abs(ULONG size, ULONG addr, struct uaestate *st)
+static UBYTE *allocate_abs(ULONG size, ULONG addr, struct uaestate *st)
 {
 		UBYTE *b = AllocAbs(size, (APTR)addr);
 		if (b) {
@@ -487,39 +449,85 @@ UBYTE *allocate_abs(ULONG size, ULONG addr, struct uaestate *st)
 		return NULL;
 }
 
-static UBYTE *extra_allocate(ULONG size, struct uaestate *st)
+UBYTE *extra_allocate(ULONG size, ULONG alignment, struct uaestate *st)
 {
 	UBYTE *b;
+	WORD idx = 0;
 	
-	for (;;) {
-		b = AllocAbs(size, st->extra_mem_pointer);
+	while (idx < MAX_EXTRARAM) {
+		struct extraram *er = &st->eram[idx];
+		if (!er->base) {
+			idx++;
+			continue;
+		}
+		ULONG addr = (ULONG)er->ptr;
+		addr += alignment - 1;
+		addr &= ~(alignment - 1);
+		er->ptr = (void*)addr;
+			
+		if (er->ptr + size >= er->base + er->size) {
+			idx++;
+			continue;
+		}
+
+		b = AllocAbs(size, er->ptr);
 		if (b) {
 			add_allocation(b, size, st);
-			st->extra_mem_pointer += (size + 7) & ~7;
+			er->ptr += (size + 7) & ~7;
 			return b;
 		}
-		st->extra_mem_pointer += 8;
-		if (st->extra_mem_pointer + size >= st->extra_ram + st->extra_ram_size)
-			return NULL;
+		er->ptr += 8;
 	}
+	return NULL;
+}
+
+static ULONG mmu_remap(ULONG addr, ULONG size, BOOL wp, ULONG alignedphys, struct uaestate *st)
+{
+	void *phys;
+	BOOL alloc = FALSE;
+	if (!st->canusemmu)
+		return 0;
+	if (!alignedphys) {
+		// Fast RAM required, must fail if only chip ram available
+		alignedphys = (ULONG)extra_allocate(size, 4096, st);
+		if (!alignedphys) {
+			printf("MMU: Error allocating remap space for %08lx-%08lx.\n", addr, addr + size - 1);
+			return 0;
+		}
+		alloc = TRUE;
+	}
+	phys = (void*)alignedphys;
+	if (!map_region(st, (void*)addr, phys, size, FALSE, wp, FALSE, 0)) {
+		if (alloc)
+			FreeMem(phys, size);
+		return 0;
+	}
+	st->mmuused++;
+	return alignedphys;
 }
 
 // allocate from extra mem
 static UBYTE *tempmem_allocate(ULONG size, struct uaestate *st)
 {
 	UBYTE *b = NULL;
-	if (st->extra_mem_head) {
-		b = Allocate(st->extra_mem_head, size);
-		if (b) {
-			struct Allocation *a = add_allocation(b, size, st);
-			if (a)
-				a->mh = st->extra_mem_head;
+	
+	for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+		struct extraram *er = &st->eram[idx];
+		if (er->head) {
+			b = Allocate(er->head, size);
+			if (b) {
+				struct Allocation *a = add_allocation(b, size, st);
+				if (a)
+					a->mh = er->head;
+			}
 		}
+		if (!b) {
+			b = extra_allocate(size, 8, st);
+		}
+		if (b)
+			return b;
 	}
-	if (!b) {
-		b = extra_allocate(size, st);
-	}
-	return b;
+	return NULL;
 }
 
 // allocate from statefile reserved bank index
@@ -530,7 +538,7 @@ static UBYTE *tempmem_allocate_reserved(ULONG size, WORD index, struct uaestate 
 		return NULL;
 	UBYTE *addr = mb->targetaddr;
 	for (;;) {
-		addr += 32768;
+		addr += 4096;
 		if (addr - mb->targetaddr + size >= mb->targetsize)
 			return NULL;
 		UBYTE *b = AllocAbs(size, addr);
@@ -733,10 +741,8 @@ static BOOL has_maprom_gvp(struct uaestate *st)
 			case 0x30:
 				gvpmaprom = gvp_gforce2k_040;
 				break;
-			case 0x60:
-			case 0x70:
-			case 0xe0:
-			case 0xf0:
+			case 0xa0:
+			case 0xb0:
 				gvpmaprom = gvp_gforce030;
 				break;
 			case 0xc0:
@@ -900,13 +906,8 @@ static BOOL has_maprom_mmu(struct uaestate *st)
 	if (!st->canusemmu)
 		return FALSE;
 	struct mapromdata *mrd = &st->mrd[0];
-	unmap_region(st, (void*)0xf80000, 524288);
-	mrd->addr = mmu_remap(0xf80000, 524288, FALSE, 0, st);
-	if (mrd->addr) {
-		mrd->type = MAPROM_MMU;
-		return TRUE;
-	}
-	return FALSE;
+	mrd->type = MAPROM_MMU;
+	return TRUE;
 }
 
 static BOOL has_maprom(struct uaestate *st)
@@ -1119,7 +1120,7 @@ static UBYTE *read_chunk(FILE *f, UBYTE *cname, ULONG *sizep, ULONG *flagsp, str
 	}
 	
 	if (!found) {
-		//printf("Skipped chunk '%s', %ld bytes, flags %08x\n", cname, size, flags);
+		//printf("Skipped chunk '%s', %lu bytes, flags %08x\n", cname, size, flags);
 		fseek(f, size, SEEK_CUR);
 		if (size)
 			fseek(f, 4 - (size & 3), SEEK_CUR);
@@ -1146,6 +1147,27 @@ static UBYTE *read_chunk(FILE *f, UBYTE *cname, ULONG *sizep, ULONG *flagsp, str
 	return chunk;	
 }
 
+static void enable_extra_ram(struct uaestate *st)
+{
+		struct extraram *er = &st->eram[0];
+		if (!er->ptr)
+			er->ptr = er->base;
+}
+
+static WORD mem_weight(UBYTE *p)
+{
+	ULONG v = (ULONG)p;
+	if (!v)
+		return -1;
+	if (v < 0x00200000)
+		return 0;
+	if (v >= 0x00c00000 && v < 0x01000000)
+		return 1;
+	if (v < 0x01000000)
+		return 2;
+	return 3;
+}
+
 static void find_extra_ram(struct uaestate *st)
 {
 	Forbid();
@@ -1153,24 +1175,69 @@ static void find_extra_ram(struct uaestate *st)
 	while (mh->mh_Node.ln_Succ) {
 		ULONG mstart = ((ULONG)mh->mh_Lower) & 0xffff0000;
 		ULONG msize = ((((ULONG)mh->mh_Upper) + 0xffff) & 0xffff0000) - mstart;
-		int i;
-		for (i = 0; i < MEMORY_REGIONS; i++) {
-			if (st->mem_allocated[i] == mh)
+		BOOL found = FALSE;
+		for (WORD i = 0; i < MEMORY_REGIONS; i++) {
+			if (st->mem_allocated[i] == mh) {
+				found = TRUE;
 				break;
+			}
 		}
-		if (i == MEMORY_REGIONS && (mstart != st->mrd[0].memunavailable && mstart != st->mrd[1].memunavailable)) {
-			if (msize > st->extra_ram_size) {
-				st->extra_ram = (UBYTE*)mstart;
-				st->extra_ram_size = msize;
-				st->extra_mem_head = mh;
-			}	
+		if (!found && (mstart != st->mrd[0].memunavailable && mstart != st->mrd[1].memunavailable)) {
+			found = FALSE;
+			for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+				struct extraram *er = &st->eram[idx];
+				if (er->base == (UBYTE*)mstart) {
+					found = TRUE;
+					break;
+				}
+			}
+			if (!found) {
+				found = FALSE;
+				for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+					struct extraram *er = &st->eram[idx];
+					if (!er->base) {
+						er->base = (UBYTE*)mstart;
+						er->size = msize;
+						er->head = mh;
+						found = TRUE;
+						break;
+					}
+				}
+				if (!found) {
+					// replace smaller region if available
+					for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+						struct extraram *er = &st->eram[idx];
+						if (er->base && msize > er->size) {
+							er->base = (UBYTE*)mstart;
+							er->size = msize;
+							er->head = mh;
+							break;
+						}
+					}
+				}
+			}
 		}
 		mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
 	}
 	Permit();
+
+	for (WORD idx1 = 0; idx1 < MAX_EXTRARAM; idx1++) {
+		struct extraram *er1 = &st->eram[idx1];
+		int w1 = mem_weight(er1->base);
+		for (WORD idx2 = idx1 + 1; idx2 < MAX_EXTRARAM; idx2++) {
+			struct extraram *er2 = &st->eram[idx2];
+			int w2 = mem_weight(er2->base);
+			if (w1 < w2) {
+				struct extraram er;
+				memcpy(&er, er1, sizeof(struct extraram));
+				memcpy(er1, er2, sizeof(struct extraram));
+				memcpy(er2, &er, sizeof(struct extraram));
+			}
+		}
+	}
 }
 
-static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, ULONG addr, ULONG offset, ULONG chunksize, ULONG flags, struct uaestate *st)
+static void check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, ULONG addr, ULONG offset, ULONG chunksize, ULONG flags, BOOL earlycheck, struct uaestate *st)
 {
 	ULONG size;
 	if (flags & 1) // compressed
@@ -1197,6 +1264,8 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 	}
 	Permit();
 	if (!found) {
+		if (earlycheck)
+			return;
 		// use MMU to create this address space if available
 		if (mmu_remap(addr, size, FALSE, 0, st)) {
 			msize = size;
@@ -1206,7 +1275,7 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 		} else {
 			printf("ERROR: Required RAM address space %08x-%08x unavailable.\n", addr, addr + size - 1);
 			st->errors++;
-			return 0;
+			return;
 		}
 	}
 	st->mem_allocated[index] = mh;
@@ -1218,18 +1287,29 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 	mb->flags = flags;
 	strcpy(mb->chunk, cname);
 	if (st->debug)
-		printf("- Detected memory at %08x, total size %luk. Offset %ld.\n", mstart, msize >> 10, offset);
+		printf("- Detected memory at %08x, total size %luk. Offset %lu.\n", mstart, msize >> 10, offset);
 	if (found > 0) {
 		if (st->debug)
 			printf("- Memory is usable (%luk required, %luk unused).\n", size >> 10, (msize - size) >> 10);
 		ULONG extrasize = msize - size;
 		if (extrasize >= 524288) {
-			if ((mstart >= 0x00200000 && st->extra_ram < (UBYTE*)0x00200000) || extrasize > st->extra_ram_size) {
-				st->extra_ram = (UBYTE*)(mstart + size);
-				st->extra_ram_size = extrasize;
+			UBYTE *base = (UBYTE*)(mstart + size);
+			for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+				struct extraram *er = &st->eram[idx];
+				if (er->base == base)
+					return;
+			}
+			for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+				struct extraram *er = &st->eram[idx];
+				if (((mstart >= 0x00200000 && er->base < (UBYTE*)0x00200000) || extrasize > er->size) && er->base != base) {
+					er->base = base;
+					er->size = extrasize;
+					er->head = NULL;
+					break;
+				}
 			}
 		}
-		return 1;
+		return;
 	}
 	// if too small RAM area: mmu remap the missing part.
 	if (st->canusemmu) {
@@ -1251,21 +1331,27 @@ static ULONG check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, U
 				mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
 			}
 			Permit();
+			if (earlycheck)
+				return;
 			printf("- MMU: ECS Agnus 512k to 1M Chip RAM remapping enabled.\n");
 			phys = 0xc00000;
 		}
+		if (earlycheck)
+			return;
 		ULONG physout = mmu_remap(mmu_start, mmu_size, FALSE, phys, st);
 		if (physout) {
 			printf("- MMU remapped missing address space %08lx-%08lx -> %08lx\n", mmu_start, mmu_start + mmu_size - 1, physout);
 			if (mstart == 0 && !phys) {
 				printf("- WARNING: Part of Chip RAM remapped, custom chipset can't access it!!\n");
 			}
-			return 1;
+			return;
 		}
 	}
+	if (earlycheck)
+		return;
 	printf("ERROR: Not enough %s RAM available. %luk required.\n", ramname, size >> 10);
 	st->errors++;
-	return 0;
+	return;
 }
 
 static void floppy_info(int num, UBYTE *p)
@@ -1335,12 +1421,20 @@ static void check_rom(UBYTE *p, struct uaestate *st)
 			printf("- '%s'\n", path);
 		st->romver = ver;
 		st->romrev = rev;
-		WORD mr = has_maprom(st);
-		if (mr == 0) {
-			if (st->debug)
-				printf("Map ROM support not detected\n");
-		} else if (mr > 0) {
-			printf("- Map ROM hardware detected.\n");
+		if (st->usemaprom) {
+			if (st->canusemmu) {
+				struct mapromdata *mrd = &st->mrd[0];
+				unmap_region(st, (void*)0xf80000, 524288);
+				mrd->addr = mmu_remap(0xf80000, 524288, FALSE, 0, st);
+				if (!mrd->addr)
+					mrd->type = 0;
+			}
+			if (st->mrd[0].type != 0 || st->mrd[1].type != 0) {
+				printf("- Map ROM hardware detected.\n");
+			} else {
+				if (st->debug)
+					printf("Map ROM support not detected\n");
+			}
 		}
 	}
 }
@@ -1426,7 +1520,7 @@ static int parse_pass_2(FILE *f, struct uaestate *st)
 	return st->errors;
 }
 
-static int parse_pass_1(FILE *f, struct uaestate *st)
+static int parse_pass_1(FILE *f, BOOL earlycheck, struct uaestate *st)
 {
 	int first = 1;
 	UBYTE *b = NULL;
@@ -1453,83 +1547,95 @@ static int parse_pass_1(FILE *f, struct uaestate *st)
 			continue;
 		}
 
-		if (!strcmp(cname, "CPU ")) {
-			ULONG smodel = 68000;
-			for (int i = 0; i < 4; i++) {
-				if (SysBase->AttnFlags & (1 << i))
-					smodel += 10;
+		if (!earlycheck) {
+			if (!strcmp(cname, "CPU ")) {
+				ULONG smodel = 68000;
+				for (int i = 0; i < 4; i++) {
+					if (SysBase->AttnFlags & (1 << i))
+						smodel += 10;
+				}
+				if (SysBase->AttnFlags & 0x80)
+					smodel = 68060;
+				ULONG model = getlong(b, 0);
+				printf("CPU: %lu.\n", model);
+				if (smodel != model) {
+					printf("- WARNING: %lu CPU statefile but system has %lu CPU.\n", model, smodel);
+				}
+			} else if(!strcmp(cname, "FPU ")) {
+				ULONG model = getlong(b, 0);
+				ULONG smodel = 0;
+				if (SysBase->AttnFlags & AFF_68882)
+					smodel = 68882;
+				else if (SysBase->AttnFlags & AFF_68881)
+					smodel = 68881;
+				if (SysBase->AttnFlags & 0x80)
+					smodel = 68060;
+				else if (SysBase->AttnFlags & AFF_68040)
+					smodel = 68040;
+				if (model && !smodel) {
+					printf("- WARNING: FPU statefile (%lu) but system has no FPU.\n", model);
+				} else if (model != smodel) {
+					printf("- WARNING: %lu FPU statefile but system has %lu FPU.\n", model, smodel);
+				}
+			} else if (!strcmp(cname, "CHIP")) {
+				UWORD vposr = getword(b, 4 + 4); // VPOSR
+				volatile struct Custom *c = (volatile struct Custom*)0xdff000;
+				UWORD svposr = c->vposr;
+				int aga = (vposr & 0x0f00) == 0x0300;
+				int ecs = (vposr & 0x2000) == 0x2000;
+				int ntsc = (vposr & 0x1000) == 0x1000;
+				int saga = (svposr & 0x0f00) == 0x0300;
+				int secs = (svposr & 0x2000) == 0x2000;
+				int sntsc = (svposr & 0x1000) == 0x1000;
+				printf("Chipset: %s %s (0x%04X).\n", aga ? "AGA" : (ecs ? "ECS" : "OCS"), ntsc ? "NTSC" : "PAL", vposr);
+				if (aga && !saga) {
+					printf("- WARNING: AGA statefile but system is OCS/ECS.\n");
+				}
+				if (saga && !aga) {
+					printf("- WARNING: OCS/ECS statefile but system is AGA.\n");
+				}
+				if (!sntsc && !secs && ntsc) {
+					printf("- WARNING: NTSC statefile but system is OCS PAL.\n");
+				}
+				if (sntsc && !secs && !ntsc) {
+					printf("- WARNING: PAL statefile but system is OCS NTSC.\n");
+				}
+				st->agastate = aga;
+			} else if (!strcmp(cname, "ROM ")) {
+				check_rom(b, st);
 			}
-			if (SysBase->AttnFlags & 0x80)
-				smodel = 68060;
-			ULONG model = getlong(b, 0);
-			printf("CPU: %lu.\n", model);
-			if (smodel != model) {
-				printf("- WARNING: %lu CPU statefile but system has %lu CPU.\n", model, smodel);
-			}
-		} else if(!strcmp(cname, "FPU ")) {
-			ULONG model = getlong(b, 0);
-			ULONG smodel = 0;
-			if (SysBase->AttnFlags & AFF_68882)
-				smodel = 68882;
-			else if (SysBase->AttnFlags & AFF_68881)
-				smodel = 68881;
-			if (SysBase->AttnFlags & 0x80)
-				smodel = 68060;
-			else if (SysBase->AttnFlags & AFF_68040)
-				smodel = 68040;
-			if (model && !smodel) {
-				printf("- ERROR: FPU required\n");
-				st->errors++;
-			} else if (model != smodel) {
-				printf("- WARNING: %lu FPU statefile but system has %lu FPU.\n", model, smodel);
-			}
-		} else if (!strcmp(cname, "CHIP")) {
-			UWORD vposr = getword(b, 4 + 4); // VPOSR
-			volatile struct Custom *c = (volatile struct Custom*)0xdff000;
-			UWORD svposr = c->vposr;
-			int aga = (vposr & 0x0f00) == 0x0300;
-			int ecs = (vposr & 0x2000) == 0x2000;
-			int ntsc = (vposr & 0x1000) == 0x1000;
-			int saga = (svposr & 0x0f00) == 0x0300;
-			int secs = (svposr & 0x2000) == 0x2000;
-			int sntsc = (svposr & 0x1000) == 0x1000;
-			printf("Chipset: %s %s (0x%04X).\n", aga ? "AGA" : (ecs ? "ECS" : "OCS"), ntsc ? "NTSC" : "PAL", vposr);
-			if (aga && !saga) {
-				printf("- WARNING: AGA statefile but system is OCS/ECS.\n");
-			}
-			if (saga && !aga) {
-				printf("- WARNING: OCS/ECS statefile but system is AGA.\n");
-			}
-			if (!sntsc && !secs && ntsc) {
-				printf("- WARNING: NTSC statefile but system is OCS PAL.\n");
-			}
-			if (sntsc && !secs && !ntsc) {
-				printf("- WARNING: PAL statefile but system is OCS NTSC.\n");
-			}
-			st->agastate = aga;
-		} else if (!strcmp(cname, "CRAM")) {
-			check_ram("Chip", cname, b, MB_CHIP, 0x000000, offset, size, flags, st);
+		}
+		
+		if (!strcmp(cname, "CRAM")) {
+			check_ram("Chip", cname, b, MB_CHIP, 0x000000, offset, size, flags, earlycheck, st);
 		} else if (!strcmp(cname, "BRAM")) {
-			check_ram("Slow", cname, b, MB_SLOW, 0xc00000, offset, size, flags, st);
+			check_ram("Slow", cname, b, MB_SLOW, 0xc00000, offset, size, flags, earlycheck, st);
 		} else if (!strcmp(cname, "FRAM")) {
-			check_ram("Fast", cname, b, MB_FAST, 0x200000, offset, size, flags, st);
-		} else if (!strcmp(cname, "ROM ")) {
-			check_rom(b, st);
+			check_ram("Fast", cname, b, MB_FAST, 0x200000, offset, size, flags, earlycheck, st);
 		}
 
 		free(b);
 		b = NULL;
 	}
 	
+	free(b);
+	if (earlycheck)
+		return 0;	
+	
 	if (!st->errors) {
 		find_extra_ram(st);
-		if (!st->extra_ram) {
+		if (!st->eram[0].base) {
 			printf("ERROR: At least 512k RAM not used by statefile required.\n");
 			st->errors++;
 		} else {
-			if (st->debug)
-				printf("%luk extra RAM at %08x.\n", st->extra_ram_size >> 10, st->extra_ram);
-			st->extra_mem_pointer = st->extra_ram;
+			if (st->debug) {
+				for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
+					struct extraram *er = &st->eram[idx];
+					if (er->base)
+						printf("%d: %luk extra RAM at %08x (%08lx).\n", idx, er->size >> 10, er->base, er->ptr);
+				}
+			}
+			enable_extra_ram(st);
 			st->errors = 0;
 		}
 	} else {
@@ -1537,8 +1643,6 @@ static int parse_pass_1(FILE *f, struct uaestate *st)
 		st->errors++;
 	}
 
-	free(b);
-	
 	return st->errors;
 }
 
@@ -1616,19 +1720,6 @@ static void take_over(struct uaestate *st)
 {
 	// Copy stack, variables and code to safe location
 
-	UBYTE *tempsp = tempmem_allocate(TEMP_STACK_SIZE, st);
-	if (!tempsp) {
-		printf("Out of memory for temp stack (%lu bytes).\n", TEMP_STACK_SIZE);
-		return;
-	}
-
-	struct uaestate *tempst = (struct uaestate*)tempmem_allocate(sizeof(struct uaestate), st);
-	if (!tempst) {
-		printf("Out of memory for temp state variables (%lu bytes).\n", sizeof(struct uaestate));
-		return;	
-	}
-	memcpy(tempst, st, sizeof(struct uaestate));
-
 	struct Process *me = (struct Process*)FindTask(0);
 	struct CommandLineInterface *cli = (struct CommandLineInterface*)((((ULONG)me->pr_CLI) << 2));
 	if (!cli) {
@@ -1636,12 +1727,16 @@ static void take_over(struct uaestate *st)
 		return;
 	}
 	ULONG *module = (ULONG*)(cli->cli_Module << 2);
-	ULONG hunksize = module[-1] << 2;
-	UBYTE *newcode = tempmem_allocate(hunksize, st);
+	ULONG hunksize = module[-1];
+
+	UBYTE *newcode = tempmem_allocate(hunksize + TEMP_STACK_SIZE + sizeof(struct uaestate), st);
 	if (!newcode) {
-		printf("Out of memory for temp code (%lu bytes).\n", hunksize);
+		printf("Out of memory, %ld bytes required.\n", hunksize + TEMP_STACK_SIZE + sizeof(struct uaestate));
 		return;
 	}
+	UBYTE *tempsp = newcode + hunksize;
+	struct uaestate *tempst = (struct uaestate*)(tempsp + TEMP_STACK_SIZE);
+	memcpy(tempst, st, sizeof(struct uaestate));
 	memcpy(newcode, module, hunksize);
 	
 	// ugly relocation hack but jumps to other module (from asm.S) are always absolute..
@@ -1787,16 +1882,32 @@ int main(int argc, char *argv[])
 		st->flags &= ~(FLAGS_NOCACHE | FLAGS_NOCACHE2);
 	}
 	
+	has_maprom(st);
+	
 	if (st->canusemmu) {	
+		// if MMU mode, need to find unused RAM for page tables.
+		parse_pass_1(f, TRUE, st);
+		find_extra_ram(st);
+		if (!st->eram[0].base) {
+			printf("ERROR: No memory for MMU page tables.\n");
+			goto end;
+		}
+		enable_extra_ram(st);
+		if (st->debug)
+			printf("MMU page tables at %08lx\n", st->eram[0].base);
 		if (!init_mmu(st)) {
 			printf("ERROR: MMU page table allocation failed.\n");
-			st->canusemmu = 0;
+			goto end;
 		} else {
 			printf("MMU mode enabled.\n");
 		}
+		for (int i = 0; i < MEMORY_REGIONS; i++) {
+			st->mem_allocated[i] = NULL;
+		}
+		fseek(f, 0, SEEK_SET);
 	}
 
-	if (!parse_pass_1(f, st)) {
+	if (!parse_pass_1(f, FALSE, st)) {
 		fseek(f, 0, SEEK_SET);
 		if (!parse_pass_2(f, st)) {
 			take_over(st);			
@@ -1806,6 +1917,8 @@ int main(int argc, char *argv[])
 	} else {
 		printf("Pass #1 failed.\n");
 	}
+
+end:
 	
 	free(st);
 	

@@ -1,7 +1,7 @@
 
-#define TEMP_STACK_SIZE 8000
+#define TEMP_STACK_SIZE 6000
 
-#define ALLOCATIONS 256
+#define ALLOCATIONS 64
 
 struct Allocation
 {
@@ -52,6 +52,16 @@ struct mapromdata
 	ULONG memunavailable;
 };
 
+#define MAX_EXTRARAM 4
+
+struct extraram
+{
+	UBYTE *base;
+	UBYTE *ptr;
+	ULONG size;
+	struct MemHeader *head;
+};
+
 struct uaestate
 {
 	ULONG flags;
@@ -70,17 +80,15 @@ struct uaestate
 	ULONG maprom_memlimit;
 	struct mapromdata mrd[2];
 
-	UBYTE *extra_ram;
-	ULONG extra_ram_size;
 	ULONG errors;
 
 	struct MemHeader *mem_allocated[MEMORY_REGIONS];
-	struct MemHeader *extra_mem_head;
-	UBYTE *extra_mem_pointer;
 	struct MemoryBank membanks[MEMORY_REGIONS];
 
-	int num_allocations;
+	WORD num_allocations;
 	struct Allocation allocations[ALLOCATIONS];
+
+	struct extraram eram[MAX_EXTRARAM];
 	
 	WORD mmutype;
 	UBYTE *page_ptr;
@@ -96,7 +104,7 @@ struct uaestate
 	UBYTE mmuused;
 };
 
-UBYTE *allocate_abs(ULONG size, ULONG addr, struct uaestate *st);
+UBYTE *extra_allocate(ULONG size, ULONG alignment, struct uaestate *st);
 
 BOOL map_region(struct uaestate *st, void *addr, void *physaddr, ULONG size, BOOL invalid, BOOL writeprotect, BOOL supervisor, UBYTE cachemode);
 BOOL unmap_region(struct uaestate *st, void *addr, ULONG size);
