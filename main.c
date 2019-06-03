@@ -71,6 +71,18 @@ static ULONG getword(UBYTE *chunk, int offset)
 	v = (chunk[0] << 8) | (chunk[1] << 0);
 	return v;
 }
+static void putlong(UBYTE *p, ULONG v)
+{
+	p[0] = v >> 24;
+	p[1] = v >> 16;
+	p[2] = v >> 8;
+	p[3] = v;
+}
+static void putword(UBYTE *p, UWORD v)
+{
+	p[0] = v >> 8;
+	p[1] = v;
+}
 
 static void set_agacolor(UBYTE *p)
 {
@@ -547,6 +559,43 @@ static UBYTE *tempmem_allocate_reserved(ULONG size, WORD index, struct uaestate 
 			return b;
 		}
 	}
+}
+
+static void createvbr(struct uaestate *st)
+{
+	if (!st->debug_entry)
+		return;
+	if (!(SysBase->AttnFlags & AFF_68010))
+		return;
+	WORD start = 2;
+	WORD end = 48;
+	st->vbr = tempmem_allocate(1024 + (end - start) * 6, st);
+	if (!st->vbr)
+		return;
+	UBYTE *p = st->vbr + 1024;
+	UBYTE *p2 = st->vbr;
+	for (WORD i = start; i < end; i++) {
+		putlong(p2 + i * 4, (ULONG)p);
+		putlong(p + 0, 0x2f380000 + i * 4); // MOVE.L xxxx.w,(-SP)
+		putword(p + 4, 0x4e75); // RTS
+		p += 6;
+	}
+	// NMI
+	putlong(p2 + 0x7c, (ULONG)st->debug_entry);
+	// Bus error
+	putlong(p2 + 0x08, (ULONG)st->debug_entry);
+}
+
+static void has_debugger(struct uaestate *st)
+{
+	ULONG v = getlong(0, 0x7c);
+	if (v & 3)
+		return;
+	UBYTE *p = (UBYTE*)v;
+	if (getlong(p - 4, 0) != 0x48525421) // HRT!
+		return;
+	printf("HRTMon detected.\n");
+	st->debug_entry = p;
 }
 
 static void copyrom(ULONG addr, struct uaestate *st)
@@ -1713,11 +1762,22 @@ static void processstate(struct uaestate *st)
 	set_cia(st->ciaa_chunk, 0);
 	set_cia(st->ciab_chunk, 1);
 
+	if (st->debug_entry && !st->vbr) {
+		// If 68000:
+		// NMI
+		putlong((void*)0x7c, (ULONG)st->debug_entry);
+		// Bus error
+		putlong((void*)0x08, (ULONG)st->debug_entry);
+	}
+
 	runit(st);
 }
 
 static void take_over(struct uaestate *st)
 {
+
+	createvbr(st);
+	
 	// Copy stack, variables and code to safe location
 
 	struct Process *me = (struct Process*)FindTask(0);
@@ -1883,6 +1943,8 @@ int main(int argc, char *argv[])
 	}
 	
 	has_maprom(st);
+	
+	has_debugger(st);
 	
 	if (st->canusemmu) {	
 		// if MMU mode, need to find unused RAM for page tables.

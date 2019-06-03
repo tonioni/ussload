@@ -74,6 +74,8 @@ struct uaestate
 	UBYTE *audio_chunk[4];
 	UBYTE *sprite_chunk[8];
 	ULONG *MMU_Level_A;
+	UBYTE *vbr;
+	UBYTE *debug_entry;
 
 	UBYTE *maprom;
 	ULONG mapromsize;

@@ -9,6 +9,8 @@ FLOPPY_CHUNK = AGA_COLORS_CHUNK+4
 AUDIO_CHUNK = FLOPPY_CHUNK+4*4
 SPRITE_CHUNK = AUDIO_CHUNK+4*4
 MMU_TABLE = SPRITE_CHUNK+4*8
+VBR_TABLE = MMU_TABLE+4
+DEBUG_ENTRY = VBR_TABLE+4
 
 	.text
 	.globl _runit
@@ -262,6 +264,14 @@ _runit:
 	| pause
 	btst #3,3(a4)
 	beq.s .pausemode2
+
+	btst #0,1(a4) | 68010+?
+	beq.s .pausevbr
+	move.l VBR_TABLE(a4),d0
+	beq.s .pausevbr
+	movec d0,VBR
+.pausevbr:
+
 .pausemode3:
 	btst #6,0xbfe001
 	bne.s .pausemode3
@@ -338,6 +348,10 @@ _runit:
 .nocpu68020:
 	| 68010+ stack frame fix
 	move.w #0x0020,-(sp) | Format 0, Trap #0
+	| set our debugging VBR?
+	move.l VBR_TABLE(a4),d0
+	beq.s .nocpu68010
+	movec d0,VBR
 .nocpu68010:
 
 	| prepare CIA timer control values
