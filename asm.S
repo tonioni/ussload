@@ -348,7 +348,10 @@ _runit:
 .nocpu68020:
 	| 68010+ stack frame fix
 	move.w #0x0020,-(sp) | Format 0, Trap #0
-	| set our debugging VBR?
+	| Debugging VBR, don't change VBR if originally non-zero
+	movec vbr,d0
+	tst.l d0
+	bne.s .nocpu68010
 	move.l VBR_TABLE(a4),d0
 	beq.s .nocpu68010
 	movec d0,VBR

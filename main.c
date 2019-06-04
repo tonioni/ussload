@@ -561,6 +561,28 @@ static UBYTE *tempmem_allocate_reserved(ULONG size, WORD index, struct uaestate 
 	}
 }
 
+static void debugtraps(UBYTE *vbr, struct uaestate *st)
+{
+	// NMI
+	putlong(vbr + 0x7c, (ULONG)st->debug_entry);
+	// Bus error
+	putlong(vbr + 0x08, (ULONG)st->debug_entry);
+	// Exceptions
+	ULONG mask = st->exceptionmask;
+	for (ULONG i = 0; i < 16; i++) {
+		if (mask & (1 << i)) {
+			putlong(vbr + i * 4, (ULONG)st->debug_entry);
+		}
+	}
+	// Traps
+	mask >>= 16;
+	for (ULONG i = 32; i < 48; i++) {
+		if (mask & (1 << (i - 32))) {
+			putlong(vbr + i * 4, (ULONG)st->debug_entry);
+		}
+	}
+}
+
 static void createvbr(struct uaestate *st)
 {
 	if (!st->debug_entry)
@@ -580,10 +602,7 @@ static void createvbr(struct uaestate *st)
 		putword(p + 4, 0x4e75); // RTS
 		p += 6;
 	}
-	// NMI
-	putlong(p2 + 0x7c, (ULONG)st->debug_entry);
-	// Bus error
-	putlong(p2 + 0x08, (ULONG)st->debug_entry);
+	debugtraps(p2, st);
 }
 
 static void has_debugger(struct uaestate *st)
@@ -1762,12 +1781,18 @@ static void processstate(struct uaestate *st)
 	set_cia(st->ciaa_chunk, 0);
 	set_cia(st->ciab_chunk, 1);
 
-	if (st->debug_entry && !st->vbr) {
-		// If 68000:
-		// NMI
-		putlong((void*)0x7c, (ULONG)st->debug_entry);
-		// Bus error
-		putlong((void*)0x08, (ULONG)st->debug_entry);
+	if (st->debug_entry) {
+		// if statefile CPU > 68000 and statefile VBR != 0: directly modify original VBR
+		if (getlong(st->cpu_chunk, 0) > 68000) {
+			ULONG vbr =  getlong(st->cpu_chunk, 4+4+60+4+2+2+4+4+2+4+4+4);
+			if (vbr != 0) {
+				debugtraps((UBYTE*)vbr, st);
+			}
+		}
+		// if host system is 68000: directly modify "VBR"
+		if (!st->vbr) {
+			debugtraps(st->vbr, st);
+		}
 	}
 
 	runit(st);
@@ -1913,6 +1938,12 @@ int main(int argc, char *argv[])
 			st->flags |= FLAGS_PAUSE;
 		if (!stricmp(argv[i], "nofloppy"))
 			st->flags |= FLAGS_NOFLOPPY;
+		if (i + 1 < argc) {
+			if (!stricmp(argv[i], "trap")) {
+				char *p;
+				st->exceptionmask = strtoul(argv[i + 1], &p, 16);
+			}	
+		}
 	}
 
 	if ((SysBase->AttnFlags & AFF_68020) && !(SysBase->AttnFlags & AFF_68030) && SysBase->LibNode.lib_Version < 37) {

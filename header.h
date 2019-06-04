@@ -97,6 +97,7 @@ struct uaestate
 	ULONG page_free;
 	
 	UWORD romver, romrev;
+	ULONG exceptionmask;
 	UBYTE agastate;
 	UBYTE usemaprom;
 	UBYTE debug;
