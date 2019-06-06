@@ -1,7 +1,7 @@
 
 ussload is UAE state save file (*.uss) loader designed for real hardware.
 
-v2.0:
+New in v2.0:
 
 - MMU based memory and Map ROM support (68030, 68040 and 68060)
 - GVP MapROM support added. GVP A530 and most A2000 and A3000 GVP boards.
@@ -12,27 +12,36 @@ v2.0:
 - Fixed crash if 68020 or 68030 state file was loaded and CPU was
   68040 or 68060.
 - Fixed uncompressed state file support.
-- Load also Kickstart files from current directory.
+- Attempt to load rom image files from current directory if rom
+  image file is not found from DEVS:Kickstarts.
 - 68040 and 68060 state files supported (MMU registers are not restored)
 - FPU state file support added.
 - Pause mode. Restores state, enables display, waits for mouse button.
+- Nofloppy option, do not initialize or seek floppy drives.
+- HRTMon support. If HRTMon is installed, NMI vector is automatically
+  set to HRTMon entry point.
 - Compatibility improved.
 
+--
 
-Supported state file hardware configurations:
+ussload is mainly designed to load state files with basic A500 and
+A1200 configurations like following:
 
 Common OCS/ECS 68000 A500 configurations. Chip RAM, "Slow" RAM and
 Fast RAM supported.
 Basic A1200 68020 configuration. "Slow" RAM and Fast RAM is also
 supported.
 
+Non-RAM expansion hardware is not supported.
+
 Information:
 
 - Compatible with KS 1.2 and newer.
-- CPU should match state file config but 68020 to 68030 most likely works,
-  68000 to 68020 or 68030 depends on program, 68020 to 68000 rarely works.
-- RAM config must match (can be larger than required) and system must
-  have at least 512k more RAM than state file requires.
+- CPU should match state file config but 68020 to 68030+ most likely
+  works, 68000 to 68020+ depends on program, 68020 to 68000 rarely works.
+- If system has no MMU, RAM config must match. RAM size can be larger
+  than  required.
+- System must have at least 512k more RAM than state file requires.
 - Both compressed and uncompressed state files are supported.
 - HD compatible (state file is completely loaded before system take over)
 - KS ROM does not need to match if loaded program has already completely
@@ -49,7 +58,7 @@ Minimum RAM config examples (without MMU):
 512k+512k+512k real Fast.
 
 If MMU is available, fully or partially missing RAM address space
-is created with MMU. MMU is also used for Map ROM.
+is created with MMU. MMU is also automatically used for Map ROM.
 
 Note that uncompressed state files require at least 1M contiguous extra
 RAM because all state file RAM address spaces need to fit in RAM before
@@ -77,13 +86,14 @@ Command line parameters:
 - test = parse and load state file, exit before system take over.
 - nomaprom = do not use Map ROM.
 - nommu = do not use MMU.
-- mmu = use mmu (If CPU is 68030, MMU is not used automatically)
+- mmu = use mmu (If CPU is 68030, MMU mode is not enabled automatically)
 - nocache = disable caches before starting loaded program (68020+ only)
 - nocache2 = disable caches when taking over the system (68020+ only)
 - pause = restore state, wait left mouse button press.
 - pal = force PAL mode (ECS/AGA only)
 - ntsc = force NTSC mode (ECS/AGA only)
 - nofloppy = don't initialize floppy drives (motor state, seek)
+- trap = debugging option, see below.
 
 Background colors:
 
@@ -93,4 +103,17 @@ Background colors:
 - blue = decompressing/copying Fast RAM (0x00200000) state.
 - yellow = configuring floppy drives (seek rw head, motor state).
 
+Technical HRTMon support details:
+
+- Bus error and NMI vectors are always set if HRTMon is detected.
+- If host CPU is 68010+ and state file is 68000 or VBR=0, VBR is
+  moved and redirected to original vectors except NMI and Bus
+  error vectors.
+- If host CPU is 68000 or state file has non-zero VBR: original
+  vectors are modified directly.
+- trap <mask> command line option can be used to set other
+  exception vectors. It is bit mask where lowest 16 bits maps
+  to vectors 0 to 15. Highest 16 bits are traps, for example
+  trap ffff0000 sets all trap #0-#15 vectors.
+  
 Source: https://github.com/tonioni/ussload

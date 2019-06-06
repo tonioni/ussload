@@ -2,7 +2,7 @@
 /* Real hardware UAE state file loader */
 /* Copyright 2019 Toni Wilen */
 
-#define VER "2.0 BETA #6"
+#define VER "2.0"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -605,15 +605,17 @@ static void createvbr(struct uaestate *st)
 	debugtraps(p2, st);
 }
 
-static void has_debugger(struct uaestate *st)
+static void has_debugger(struct uaestate *st, BOOL force)
 {
 	ULONG v = getlong(0, 0x7c);
-	if (v & 3)
+	if (v & 1)
 		return;
 	UBYTE *p = (UBYTE*)v;
-	if (getlong(p - 4, 0) != 0x48525421) // HRT!
-		return;
-	printf("HRTMon detected.\n");
+	if (!force) {
+		if (getlong(p - 4, 0) != 0x48525421) // HRT!
+			return;
+		printf("HRTMon detected.\n");
+	}
 	st->debug_entry = p;
 }
 
@@ -1938,11 +1940,12 @@ int main(int argc, char *argv[])
 			st->flags |= FLAGS_PAUSE;
 		if (!stricmp(argv[i], "nofloppy"))
 			st->flags |= FLAGS_NOFLOPPY;
-		if (i + 1 < argc) {
-			if (!stricmp(argv[i], "trap")) {
+		if (!stricmp(argv[i], "trap")) {
+			if (i + 1 < argc) {
 				char *p;
 				st->exceptionmask = strtoul(argv[i + 1], &p, 16);
-			}	
+			}
+			has_debugger(st, TRUE);
 		}
 	}
 
@@ -1975,7 +1978,7 @@ int main(int argc, char *argv[])
 	
 	has_maprom(st);
 	
-	has_debugger(st);
+	has_debugger(st, FALSE);
 	
 	if (st->canusemmu) {	
 		// if MMU mode, need to find unused RAM for page tables.
