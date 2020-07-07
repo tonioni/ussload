@@ -1,13 +1,26 @@
 
 ussload is UAE state save file (*.uss) loader designed for real hardware.
 
-New in v2.0:
+v2.1:
+
+- Accept CD32 state files. Akiko and CD audio playback state
+  is restored.
+- Accept CDTV state files. DMAC and 6525 state is restored but
+  CD drive internal state is not (yet?) restored.
+- If running on CD32/CDTV and loading non-CD32/CDTV statefile:
+  automatically disable all CD related interrupts to prevent
+  possible hang (stuck CD interrupt) when restored program starts.
+- ACA1221LC Map ROM support added.
+- If <rom name>.a1200 can't be found, try also <rom name>.a500.
+  Workaround for statefiles with mismatched hardware settings.
+
+v2.0:
 
 - MMU based memory and Map ROM support (68030, 68040 and 68060)
-- GVP MapROM support added. GVP A530 and most A2000 and A3000 GVP boards.
-- Blizzard 1230 MKI/II/III/IV, 1240, 1260 MapROM support added.
-- ACA1233n MapROM support added, in both 68030 and 68EC020 modes.
-- ACA123x 128M model MapROM support fixed.
+- GVP Map ROM support added. GVP A530 and most A2000 and A3000 GVP boards.
+- Blizzard 1230 MKI/II/III/IV, 1240, 1260 Map ROM support added.
+- ACA1233n Map ROM support added, in both 68030 and 68EC020 modes.
+- ACA123x 128M model Map ROM support fixed.
 - Switch off all floppy drive motors before memory decompression.
 - Fixed crash if 68020 or 68030 state file was loaded and CPU was
   68040 or 68060.
@@ -31,6 +44,7 @@ Common OCS/ECS 68000 A500 configurations. Chip RAM, "Slow" RAM and
 Fast RAM supported.
 Basic A1200 68020 configuration. "Slow" RAM and Fast RAM is also
 supported.
+CD32 and CDTV are also partially supported.
 
 Non-RAM expansion hardware is not supported.
 
@@ -40,7 +54,7 @@ Information:
 - CPU should match state file config but 68020 to 68030+ most likely
   works, 68000 to 68020+ depends on program, 68020 to 68000 rarely works.
 - If system has no MMU, RAM config must match. RAM size can be larger
-  than  required.
+  than required.
 - System must have at least 512k more RAM than state file requires.
 - Both compressed and uncompressed state files are supported.
 - HD compatible (state file is completely loaded before system take over)
@@ -67,11 +81,11 @@ A1200 chip ram only state files usually require at least 1M Fast ram.
 
 Map ROM hardware support:
 
-ACA500, ACA500plus, ACA1221, ACA1221EC and most ACA123x variants.
-GVP A530, A2000 and A3000 G-Force models.
+ACA500, ACA500plus, ACA1221, ACA1221EC, ACA1221LC, ACA1233n and most
+ACA123x variants. GVP A530, A2000 and A3000 G-Force models.
 Blizzard 1230 MKI/MKII/MKIII/MKIV, 1240, 1260.
 
-Map ROM hardware is not used or needed if MMU mode is enabled.
+Map ROM hardware is not used or needed in MMU mode.
 
 If state file ROM is not same as hardware ROM, ROM image is automatically
 loaded from DEVS:Kickstarts or from current directory.
@@ -90,10 +104,10 @@ Command line parameters:
 - nocache = disable caches before starting loaded program (68020+ only)
 - nocache2 = disable caches when taking over the system (68020+ only)
 - pause = restore state, wait left mouse button press.
-- pal = force PAL mode (ECS/AGA only)
-- ntsc = force NTSC mode (ECS/AGA only)
+- pal/ntsc = force PAL/NTSC mode (ECS/AGA only)
 - nofloppy = don't initialize floppy drives (motor state, seek)
 - trap = debugging option, see below.
+- generic/cd32/cdtv = override hardware model autodetection.
 
 Background colors:
 

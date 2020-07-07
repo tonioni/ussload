@@ -1,8 +1,8 @@
 
 /* Real hardware UAE state file loader */
-/* Copyright 2019 Toni Wilen */
+/* Copyright 2019-2020 Toni Wilen */
 
-#define VER "2.0"
+#define VER "2.1"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -36,6 +36,7 @@ static const char *const chunknames[] =
 	"AUD0", "AUD1", "AUD2", "AUD3",
 	"SPR0", "SPR1", "SPR2", "SPR3",
 	"SPR4", "SPR5", "SPR6", "SPR7",
+	"CDTV", "DMAC", "CD32",
 	"END ",
 	NULL
 };
@@ -82,6 +83,208 @@ static void putword(UBYTE *p, UWORD v)
 {
 	p[0] = v >> 8;
 	p[1] = v;
+}
+
+
+struct Akiko
+{
+	UWORD id[2];
+	ULONG intreq;
+	ULONG intena;
+	ULONG dummy1;
+	APTR main_dma_base;
+	APTR sub_dma_base;
+	UBYTE subcode_offset;
+	UBYTE dummy2[4];
+	UBYTE transmit_offset;
+	UBYTE receive_offset_read;
+	UBYTE receive_offset_write;
+	UWORD transfer_mask;
+	UWORD dummy3;
+	ULONG config;
+	UBYTE pio;
+	UBYTE dummy4;
+	UBYTE nvram_io;
+	UBYTE dummy5;
+	UBYTE nvram_dir;
+	UBYTE dummy6[5];
+	ULONG c2p;
+	ULONG dummy7;
+};
+
+static UBYTE tobcd(UBYTE v)
+{
+	return ((v >> 4) * 10) | (v & 15);
+}
+
+static void cd32_pollstatus(void)
+{
+	volatile struct Akiko *akiko = (struct Akiko*)0xb80000;
+	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
+	UBYTE read;
+	UBYTE lof = c->vposr & 1;
+	WORD delay = 2;
+	// wait 1 frame (far too long..)
+	while (delay > 0) {
+		// read and drop any status bytes from the drive
+		if (akiko->intreq & 0x20000000) {
+			read = akiko->pio;
+		}
+		if ((c->vposr & 1) != lof) {
+			delay--;
+			lof = c->vposr & 1;
+		}
+	}
+}
+
+static void cd32_sendcmd(UBYTE *cmd, UWORD len)
+{
+	volatile struct Akiko *akiko = (struct Akiko*)0xb80000;
+	// Read any pending data
+	while (akiko->intreq & 0x20000000) {
+			UBYTE dummy = akiko->pio;
+	}
+	// Send play command
+	UBYTE checksum = 0xff;
+	for (int i = 0; i < len; i++) {
+		while (!(akiko->intreq & 0x40000000));
+		akiko->pio = cmd[i];
+		checksum -= cmd[i];
+	}
+	while (!(akiko->intreq & 0x40000000));
+	akiko->pio = checksum;
+	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
+	WORD delay = 10 * 2;
+	UBYTE lof = 0;
+	while (delay > 0) {
+		if ((c->vposr & 1) != lof) {
+			delay--;
+			lof = c->vposr & 1;
+		}
+		if (akiko->intreq & 0x20000000) {
+			UBYTE dummy = akiko->pio;
+		}
+	}
+}
+
+static void set_cd32(UBYTE *p, struct uaestate *st)
+{
+	volatile struct Akiko *akiko = (struct Akiko*)0xb80000;
+
+	if (st->hwtype != HWTYPE_CD32 || !p)
+		return;
+
+	akiko->intena = getlong(p, 0x08);
+	akiko->main_dma_base = (APTR)getlong(p, 0x10);
+	akiko->sub_dma_base = (APTR)getlong(p, 0x14);
+	akiko->subcode_offset = 0;
+	// Current position is read-only, can be only changed by sending commands.
+	// Simply set end = current.
+	akiko->transmit_offset = akiko->transmit_offset;
+	akiko->receive_offset_write = akiko->receive_offset_read;
+	// Make sure interrupt request is cleared
+	akiko->transfer_mask = 0;
+	ULONG config = getlong(p, 0x24);
+	akiko->config = config;
+
+	ULONG state = getlong(p, 0x5c);
+	// no CD inserted or play not active?
+	if (!(state & 4) || !(state & 1))
+		return;
+	// Disable all Akiko DMA
+	akiko->config = config & ~(0x80000000 | 0x40000000 | 0x20000000 | 0x08000000);
+
+	// Resume audio CD playback
+	UBYTE cmd[12] = { 0 };
+	cmd[0] = 0x12; // PAUSE
+	cd32_sendcmd(cmd, 1);
+	ULONG start = getlong(p, 0x60);
+	ULONG end = getlong(p, 0x64);
+	cmd[0] = 0x24; // PLAY
+	cmd[1] = tobcd(start >> 16);
+	cmd[2] = tobcd(start >> 8);
+	cmd[3] = tobcd(start);
+	cmd[4] = tobcd(end >> 16);
+	cmd[5] = tobcd(end >> 8);
+	cmd[6] = tobcd(end >> 0);
+	cd32_sendcmd(cmd, 12);
+	cmd[0] = 0x33; // UNPAUSE
+	cd32_sendcmd(cmd, 1);
+
+	akiko->config = config;
+}
+
+static void reset_cd32(struct uaestate *st)
+{
+	if (st->hwtype != HWTYPE_CD32)
+		return;
+
+	volatile struct Akiko *akiko = (struct Akiko*)0xb80000;
+	// disable all Akiko interrupts
+	akiko->intena = 0;
+	// disable CD DMA
+	akiko->config &= ~0x08000000;
+}
+
+static void set_cdtv(UBYTE *p, struct uaestate *st)
+{
+	if (st->hwtype != HWTYPE_CDTV || !p)
+		return;
+
+	p += 4;
+	volatile UBYTE *triport = (volatile UBYTE*)0xe900b0;
+	
+	// restore 6525 (triport)
+
+	triport[12] |= 1; // interrupt mask mode
+	triport[10] = p[8]; // IMASK
+	triport[12] &= ~1; // normal mode
+	triport[10] = p[5]; // CD
+
+	triport[ 0] = p[0]; // A
+	triport[ 2] = p[1]; // B
+	triport[ 4] = p[2]; // C
+	triport[ 6] = p[3]; // AD
+	triport[ 8] = p[4]; // BD
+	triport[12] = p[6]; // CR
+	triport[14] = p[7]; // AIR
+	p += 3;
+	
+	// TODO: CD state
+	
+}
+
+static void set_cdtv_dmac(UBYTE *p, struct uaestate *st)
+{
+	if (st->hwtype != HWTYPE_CDTV || !p)
+		return;
+
+	p += 8;
+	volatile UWORD *cdtv = (volatile UWORD*)0xe90000;
+
+	// restore DMAC
+
+	cdtv[0x80 / 2] = (p[10] << 8) | p[11]; // WTC
+	cdtv[0x82 / 2] = (p[12] << 8) | p[13];
+
+	cdtv[0x84 / 2] = (p[14] << 8) | p[15]; // ACR
+	cdtv[0x86 / 2] = (p[16] << 8) | p[17];
+	
+	cdtv[0x8e / 2] = (p[18] << 8) | p[19]; // DAWR
+}
+
+static void reset_cdtv(struct uaestate *st)
+{
+	if (st->hwtype != HWTYPE_CDTV)
+		return;
+
+	volatile UBYTE *cdtv = (volatile UBYTE*)0xe90000;
+	// disable 6525 interrupts
+	cdtv[0xb0 + 10] = 0;
+	cdtv[0xb0 + 12] = 0xf0;
+	// reset DMAC
+	cdtv[0xe2] = 0; // stop DMA
+	cdtv[0xe4] = 0; // clear interrupts
 }
 
 static void set_agacolor(UBYTE *p)
@@ -518,14 +721,27 @@ static ULONG mmu_remap(ULONG addr, ULONG size, BOOL wp, ULONG alignedphys, struc
 	return alignedphys;
 }
 
+static BOOL check_if_memory_unavailable(UBYTE *start, UBYTE *end, struct uaestate *st)
+{
+	WORD skip = 0;
+	for (WORD i = 0; i < 2; i++) {
+		struct mapromdata *mrd = &st->mrd[i];
+		if (mrd->memunavailable_end && start >= mrd->memunavailable_start && end <= mrd->memunavailable_end)
+			return TRUE;
+	}
+	return FALSE;
+}
+
 // allocate from extra mem
-static UBYTE *tempmem_allocate(ULONG size, struct uaestate *st)
+static UBYTE *tempmem_allocate(ULONG size, BOOL skip_unavailable, struct uaestate *st)
 {
 	UBYTE *b = NULL;
 	
 	for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
 		struct extraram *er = &st->eram[idx];
 		if (er->head) {
+			if (skip_unavailable && check_if_memory_unavailable(er->base, er->base + er->size, st))
+				continue;
 			b = Allocate(er->head, size);
 			if (b) {
 				struct Allocation *a = add_allocation(b, size, st);
@@ -543,12 +759,14 @@ static UBYTE *tempmem_allocate(ULONG size, struct uaestate *st)
 }
 
 // allocate from statefile reserved bank index
-static UBYTE *tempmem_allocate_reserved(ULONG size, WORD index, struct uaestate *st)
+static UBYTE *tempmem_allocate_reserved(ULONG size, WORD index, BOOL skip_unavailable, struct uaestate *st)
 {
 	struct MemoryBank *mb = &st->membanks[index];
 	if (!mb->targetsize)
 		return NULL;
 	UBYTE *addr = mb->targetaddr;
+	if (skip_unavailable && check_if_memory_unavailable(addr, addr + mb->targetsize, st))
+		return NULL;
 	for (;;) {
 		addr += 4096;
 		if (addr - mb->targetaddr + size >= mb->targetsize)
@@ -591,14 +809,14 @@ static void createvbr(struct uaestate *st)
 		return;
 	WORD start = 2;
 	WORD end = 48;
-	st->vbr = tempmem_allocate(1024 + (end - start) * 6, st);
+	st->vbr = tempmem_allocate(1024 + (end - start) * 6, FALSE, st);
 	if (!st->vbr)
 		return;
 	UBYTE *p = st->vbr + 1024;
 	UBYTE *p2 = st->vbr;
 	for (WORD i = start; i < end; i++) {
 		putlong(p2 + i * 4, (ULONG)p);
-		putlong(p + 0, 0x2f380000 + i * 4); // MOVE.L xxxx.w,(-SP)
+		putlong(p + 0, 0x2f380000 + i * 4); // MOVE.L xxxx.w,-(SP)
 		putword(p + 4, 0x4e75); // RTS
 		p += 6;
 	}
@@ -663,11 +881,28 @@ static void set_maprom(struct uaestate *st)
 		base[0x2000] = 0x00;
 		base[0x1000] = 0x03;
 		base[0x1001] = 0x01;
-		base[0x2000] = 0x00;		
+		base[0x2000] = 0x00;
 		copyrom(0x600000, st);
 		copyrom(0x780000, st);
 		base[0x1000] = 0x03;
 		base[0x1001] = 0x00;
+		base[0x2000] = 0x00;
+		base[0x1000] = 0x05;
+		base[0x1001] = 0x01;
+		base[0x2000] = 0x00;
+	}
+	if (mrd->type == MAPROM_ACA1221LC) {
+		volatile UBYTE *base = (volatile UBYTE*)mrd->board;
+		base[0x1000] = 0x05;
+		base[0x1001] = 0x00;
+		base[0x2000] = 0x00;
+		base[0x1000] = 0x03;
+		base[0x1001] = 0x02;
+		base[0x2000] = 0x00;
+		copyrom(0x600000, st);
+		copyrom(0x780000, st);
+		base[0x1000] = 0x03;
+		base[0x1001] = 0x01;
 		base[0x2000] = 0x00;
 		base[0x1000] = 0x05;
 		base[0x1001] = 0x01;
@@ -733,19 +968,19 @@ static BOOL has_maprom_blizzard(struct uaestate *st)
 	struct mapromdata *mrd = &st->mrd[0];
 	struct ConfigDev *cd;
 	// 1230MKIV/1240/1260
-	cd  = (struct ConfigDev*)FindConfigDev(0, 8512, 17);
+	cd = (struct ConfigDev*)FindConfigDev(0, 8512, 17);
 	if (cd) {
 		mrd->type = MAPROM_BLIZZARD12x0;
 		mrd->addr = 0x4ff80000;
 	}
 	// 1230MKIII
-	cd  = (struct ConfigDev*)FindConfigDev(0, 8512, 13);
+	cd = (struct ConfigDev*)FindConfigDev(0, 8512, 13);
 	if (cd) {
 		mrd->type = MAPROM_BLIZZARD12x0;
 		mrd->addr = 0x1ef80000;
 	}
 	// 1230MKI/II
-	cd  = (struct ConfigDev*)FindConfigDev(0, 8512, 11);
+	cd = (struct ConfigDev*)FindConfigDev(0, 8512, 11);
 	if (cd) {
 		mrd->type = MAPROM_BLIZZARD12x0;
 		mrd->addr = 0x0ff80000;
@@ -753,7 +988,7 @@ static BOOL has_maprom_blizzard(struct uaestate *st)
 	mrd->board = (APTR)0x80ffff00;
 	mrd->config = 0x42;
 	if (st->debug && mrd->type)
-		printf("Blizzard12x0 MapROM %08lx\n", mrd->addr);
+		printf("Blizzard12x0 MapROM %08lx.\n", mrd->addr);
 	return mrd->type != 0;
 }
 
@@ -803,7 +1038,7 @@ static BOOL has_maprom_gvp(struct uaestate *st)
 			return FALSE;
 		UBYTE v = *((volatile UBYTE*)cd->cd_BoardAddr + 0x8001);
 		if (st->debug)
-			printf("GVP ID=%02x\n", v);
+			printf("GVP ID=%02x.\n", v);
 		const ULONG *gvpmaprom = NULL;
 		switch(v & 0xf8)
 		{
@@ -858,7 +1093,7 @@ static BOOL has_maprom_gvp(struct uaestate *st)
 		}
 		Permit();
 		if (st->debug)
-			printf("GVP Map ROM=%08lx\n", mrd->addr);
+			printf("GVP Map ROM=%08lx.\n", mrd->addr);
 		return mrd->type != 0;
 }
 
@@ -893,7 +1128,7 @@ static BOOL has_maprom_aca(struct uaestate *st)
 		base[0x3000] = 0;
 		Enable();
 		if (st->debug)
-			printf("ACA500/ACA500plus ID=%02x\n", id);
+			printf("ACA500/ACA500plus ID=%02x.\n", id);
 	}
 	struct mapromdata *mrd = &st->mrd[0];
 	if (FindConfigDev(0, 0x1212, 33) || FindConfigDev(0, 0x1212, 68)) {
@@ -917,7 +1152,16 @@ static BOOL has_maprom_aca(struct uaestate *st)
 		mrd->addr = 0x780000;
 		mrd->board = (APTR)0xe90000;
 		// we can't use 0x200000 because it goes away when setting up maprom..
-		mrd->memunavailable = 0x00200000;
+		mrd->memunavailable_start = (UBYTE*)0x00200000;
+		mrd->memunavailable_end = (UBYTE*)0x00c00000;
+	} else if (FindConfigDev(0, 0x1212, 0x18)) {
+		// ACA1221LC
+		mrd->type = MAPROM_ACA1221LC;
+		mrd->addr = 0x780000;
+		mrd->board = (APTR)0xe90000;
+		// we can't use 0x200000 because it goes away when setting up maprom..
+		mrd->memunavailable_start = (UBYTE*)0x00200000;
+		mrd->memunavailable_end = (UBYTE*)0x00c00000;
 	} else if (TypeOfMem((APTR)0x0bd80000)) { // at least 62M
 		// This test should be better..
 		// perhaps it is ACA12xx
@@ -953,7 +1197,7 @@ static BOOL has_maprom_aca(struct uaestate *st)
 		dummy = base[0];
 		Enable();
 		if (st->debug)
-			printf("ACA12xx ID=%02x. MapROM=%d\n", id, mrtest);
+			printf("ACA12xx ID=%02x. MapROM=%d.\n", id, mrtest);
 		ULONG mraddr = 0;
 		if (mrtest) {
 			if (TypeOfMem((APTR)0x0bf00000)) {
@@ -1005,49 +1249,94 @@ static BOOL has_maprom(struct uaestate *st)
 	return st->mrd[0].type != 0 || st->mrd[1].type != 0;
 }
 
+static void detect_type(struct uaestate *st)
+{
+	if (st->hwtype >= 0)
+		return;
+	
+	Forbid();
+	BOOL cdtv_dev = FindName(&SysBase->DeviceList, "cdtv.device") != NULL;
+	BOOL cd_dev = FindName(&SysBase->DeviceList, "cd.device") != NULL;
+	Permit();
+
+	if (cd_dev) {
+		volatile struct Custom *c = (volatile struct Custom*)0xdff000;
+		// CD32 ?	
+		// some 68040+ boards generate exception when accessing 0xb80000
+		// for example CSPPC (which generates illegal instruction!?)
+		if ((c->vposr & 0x0f00) == 0x0300 && !(st->attnflags & AFF_68040)) {
+			// Check Akiko ID
+			volatile struct Akiko *akiko = (struct Akiko*)0xb80000;
+			if (akiko->id[1] == 0xCAFE) {
+				st->hwtype = HWTYPE_CD32;
+				return;
+			}
+		}
+	}
+	if (cdtv_dev && !cd_dev) {
+		// CDTV? Check also DMAC
+		struct ConfigDev *cd  = (struct ConfigDev*)FindConfigDev(0, 514, 3);
+		if (cd && cd->cd_BoardAddr == (APTR)0xe90000) {
+			st->hwtype = HWTYPE_CDTV;
+			return;
+		}
+	}
+}
+
 static void load_rom(struct uaestate *st)
 {
 	UBYTE rompath[100], rompath2[100];
 	UBYTE *p;
+	FILE *f = NULL;
 	
 	if (!st->mrd[0].type && !st->mrd[1].type)
 		return;
-	
-	sprintf(rompath, "DEVS:kickstarts/kick%d%03d.%s", st->romver, st->romrev, st->agastate ? "a1200" : "a500");
-	p = rompath;
-	FILE *f = fopen(rompath, "rb");
-	if (!f) {
-		sprintf(rompath2, "kick%d%03d.%s", st->romver, st->romrev, st->agastate ? "a1200" : "a500");
-		f = fopen(rompath2, "rb");
+
+	for (WORD i = 0; i < 2; i++) {
+		UBYTE agastate = st->agastate;
+		if (i)
+			agastate = !agastate;
+		sprintf(rompath, "DEVS:kickstarts/kick%d%03d.%s", st->romver, st->romrev, agastate ? "a1200" : "a500");
+		p = rompath;
+		f = fopen(rompath, "rb");
 		if (!f) {
-			printf("Couldn't open ROM image '%s'\n", rompath);
-			return;
+			sprintf(rompath2, "kick%d%03d.%s", st->romver, st->romrev, agastate ? "a1200" : "a500");
+			f = fopen(rompath2, "rb");
+			if (!f) {
+				printf("Couldn't open ROM image '%s'.\n", rompath);
+				if (i == 0)
+					continue;
+				return;
+			}
+			p = rompath2;
 		}
-		p = rompath2;
+		break;
 	}
+	if (!f)
+		return;
 	fseek(f, 0, SEEK_END);
 	st->mapromsize = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	if (!st->maprom && !(st->maprom_memlimit & (1 << MB_CHIP)))
-		st->maprom = tempmem_allocate_reserved(st->mapromsize, MB_CHIP, st);
+		st->maprom = tempmem_allocate_reserved(st->mapromsize, MB_CHIP, TRUE, st);
 	if (!st->maprom && !(st->maprom_memlimit & (1 << MB_SLOW)))
-		st->maprom = tempmem_allocate_reserved(st->mapromsize, MB_SLOW, st);
+		st->maprom = tempmem_allocate_reserved(st->mapromsize, MB_SLOW, TRUE, st);
 	if (!st->maprom)
-		st->maprom = tempmem_allocate(st->mapromsize, st);
+		st->maprom = tempmem_allocate(st->mapromsize, TRUE, st);
 	if (!st->maprom) {
 		printf("Couldn't allocate %luk for ROM image '%s'.\n", st->mapromsize >> 10, p);
 		fclose(f);
 		return;
 	}
 	if (st->debug)
-		printf("MapROM temp %08lx\n", st->maprom);
+		printf("MapROM temp %08lx-%08lx\n", st->maprom, st->maprom + st->mapromsize);
 	if (fread(st->maprom, 1, st->mapromsize, f) != st->mapromsize) {
-		printf("Read error while reading map rom image '%s'\n", p);
+		printf("Read error while reading map rom image '%s'.\n", p);
 		fclose(f);
 		return;
 	}
 	fclose(f);
-	printf("ROM '%s' (%luk) loaded .\n", rompath, st->mapromsize >> 10);
+	printf("ROM '%s' (%luk) loaded.\n", rompath, st->mapromsize >> 10);
 }
 
 static void load_memory(FILE *f, WORD index, struct uaestate *st)
@@ -1060,19 +1349,19 @@ static void load_memory(FILE *f, WORD index, struct uaestate *st)
 		printf("Memory '%s', size %luk, offset %lu. Target %08lx.\n", mb->chunk, chunksize >> 10, mb->offset, mb->targetaddr);
 	// if Chip RAM and free space in another statefile block? Put it there because chip ram is decompressed first.
 	if (index == MB_CHIP) {
-		mb->addr = tempmem_allocate_reserved(chunksize, MB_SLOW, st);
+		mb->addr = tempmem_allocate_reserved(chunksize, MB_SLOW, FALSE, st);
 		if (!mb->addr)
-			mb->addr = tempmem_allocate_reserved(chunksize, MB_FAST, st);
+			mb->addr = tempmem_allocate_reserved(chunksize, MB_FAST, FALSE, st);
 	} else if (index == MB_SLOW) {
-		mb->addr = tempmem_allocate_reserved(chunksize, MB_FAST, st);
+		mb->addr = tempmem_allocate_reserved(chunksize, MB_FAST, FALSE, st);
 	}
 	if (!mb->addr)
-		mb->addr = tempmem_allocate(chunksize, st);
+		mb->addr = tempmem_allocate(chunksize, FALSE, st);
 	if (mb->addr) {
 		if (st->debug)
 			printf(" - Address %08lx - %08lx.\n", mb->addr, mb->addr + chunksize - 1);
 		if (fread(mb->addr, 1, chunksize, f) != chunksize) {
-			printf("ERROR: Read error (Chunk '%s', %lu bytes)\n", mb->chunk, chunksize);
+			printf("ERROR: Read error (Chunk '%s', %lu bytes).\n", mb->chunk, chunksize);
 			st->errors++;
 		}		
 	} else {
@@ -1126,7 +1415,7 @@ static UBYTE *load_chunk(FILE *f, UBYTE *cname, ULONG size, struct uaestate *st)
 	
 	//printf("Allocating %lu bytes for '%s'.\n", size, cname);
 
-	b = tempmem_allocate(size, st);
+	b = tempmem_allocate(size, FALSE, st);
 	
 	//printf("Reading chunk '%s', %lu bytes to address %08x\.n", cname, size, b);
 	
@@ -1206,7 +1495,7 @@ static UBYTE *read_chunk(FILE *f, UBYTE *cname, ULONG *sizep, ULONG *flagsp, str
 		return NULL;
 	}
 	if (fread(chunk, 1, size, f) != size) {
-		printf("ERROR: Read error (Chunk '%s', %lu bytes)..\n", cname, size);
+		printf("ERROR: Read error (Chunk '%s', %lu bytes).\n", cname, size);
 		free(chunk);
 		return NULL;
 	}
@@ -1247,12 +1536,13 @@ static void find_extra_ram(struct uaestate *st)
 		ULONG msize = ((((ULONG)mh->mh_Upper) + 0xffff) & 0xffff0000) - mstart;
 		BOOL found = FALSE;
 		for (WORD i = 0; i < MEMORY_REGIONS; i++) {
+			// used by statefile? Can't be extra RAM.
 			if (st->mem_allocated[i] == mh) {
 				found = TRUE;
 				break;
 			}
 		}
-		if (!found && (mstart != st->mrd[0].memunavailable && mstart != st->mrd[1].memunavailable)) {
+		if (!found) {
 			found = FALSE;
 			for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
 				struct extraram *er = &st->eram[idx];
@@ -1410,9 +1700,9 @@ static void check_ram(UBYTE *ramname, UBYTE *cname, UBYTE *chunk, WORD index, UL
 			return;
 		ULONG physout = mmu_remap(mmu_start, mmu_size, FALSE, phys, st);
 		if (physout) {
-			printf("- MMU remapped missing address space %08lx-%08lx -> %08lx\n", mmu_start, mmu_start + mmu_size - 1, physout);
+			printf("- MMU remapped missing address space %08lx-%08lx -> %08lx.\n", mmu_start, mmu_start + mmu_size - 1, physout);
 			if (mstart == 0 && !phys) {
-				printf("- WARNING: Part of Chip RAM remapped, custom chipset can't access it!!\n");
+				printf("- WARNING: Part of Chip RAM MMU remapped, custom chipset can't access it!!\n");
 			}
 			return;
 		}
@@ -1440,7 +1730,7 @@ static void floppy_info(int num, UBYTE *p)
 
 static void fpu_process(UBYTE *fpu, struct uaestate *st)
 {
-	ULONG *b = (ULONG*)tempmem_allocate(12 * 8 + 3 * 4, st);	
+	ULONG *b = (ULONG*)tempmem_allocate(12 * 8 + 3 * 4, FALSE, st);
 	if (!b) {
 		st->fpu_chunk = NULL;
 		return;
@@ -1448,7 +1738,7 @@ static void fpu_process(UBYTE *fpu, struct uaestate *st)
 	*((ULONG**)st->fpu_chunk) = b;
 	UWORD *src = (UWORD*)(st->fpu_chunk + 8);
 	UWORD *dst = (UWORD*)b;
-	// convert 10 byte statefile format to 12 byte extended doubled
+	// convert 10 byte statefile format to 12 byte extended double
 	for (int i = 0; i < 8; i++) {
 		*dst++ = *src++;
 		*dst++ = 0;
@@ -1483,9 +1773,9 @@ static void check_rom(UBYTE *p, struct uaestate *st)
 	
 	int mismatch = ver != rver || rev != rrev;
 	if (mismatch)
-		printf("- WARNING: ROM version mismatch: %d.%d. System ROM: %d.%d\n", ver, rev, rver, rrev);
+		printf("- WARNING: ROM version mismatch: %d.%d. System ROM: %d.%d.\n", ver, rev, rver, rrev);
 	if (st->debug)
-		printf("ROM %08lx-%08lx %d.%d (CRC=%08x).\n", start, start + len - 1, ver, rev, crc32);
+		printf("ROM %08lx-%08lx %d.%d (CRC=%08lx).\n", start, start + len - 1, ver, rev, crc32);
 	if (mismatch) {
 		if (st->debug)
 			printf("- '%s'\n", path);
@@ -1503,7 +1793,7 @@ static void check_rom(UBYTE *p, struct uaestate *st)
 				printf("- Map ROM hardware detected.\n");
 			} else {
 				if (st->debug)
-					printf("Map ROM support not detected\n");
+					printf("Map ROM support not detected.\n");
 			}
 		}
 	}
@@ -1581,6 +1871,17 @@ static int parse_pass_2(FILE *f, struct uaestate *st)
 			st->sprite_chunk[6] = load_chunk(f, cname, size, st);
 		} else if (!strcmp(cname, "SPR7")) {
 			st->sprite_chunk[7] = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "CD32")) {
+			st->cd32_chunk = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "CDTV")) {
+			st->cdtv_chunk = load_chunk(f, cname, size, st);
+		} else if (!strcmp(cname, "DMAC")) {
+			if (!st->cdtv_chunk) {
+				printf("ERROR: Incompatible statefile: DMAC chunk without CDTV chunk.\n");
+				st->errors++;
+			} else {
+				st->cdtv_dmac_chunk = load_chunk(f, cname, size, st);
+			}
 		} else {
 			fseek(f, size, SEEK_CUR);
 			fseek(f, 4 - (size & 3), SEEK_CUR);
@@ -1673,6 +1974,14 @@ static int parse_pass_1(FILE *f, BOOL earlycheck, struct uaestate *st)
 				st->agastate = aga;
 			} else if (!strcmp(cname, "ROM ")) {
 				check_rom(b, st);
+			} else if (!strcmp(cname, "CD32")) {
+				if (st->hwtype != HWTYPE_CD32) {
+					printf("- WARNING: CD32 statefile but system is not CD32.\n");
+				}
+			} else if (!strcmp(cname, "CDTV")) {
+				if (st->hwtype != HWTYPE_CDTV) {
+					printf("- WARNING: CDTV statefile but system is not CDTV.\n");
+				}
 			}
 		}
 		
@@ -1702,7 +2011,7 @@ static int parse_pass_1(FILE *f, BOOL earlycheck, struct uaestate *st)
 				for (WORD idx = 0; idx < MAX_EXTRARAM; idx++) {
 					struct extraram *er = &st->eram[idx];
 					if (er->base)
-						printf("%d: %luk extra RAM at %08x (%08lx).\n", idx, er->size >> 10, er->base, er->ptr);
+						printf("%d: %luk extra RAM at %08lx-%08lx (%08lx).\n", idx, er->size >> 10, er->base, er->base + er->size, er->ptr);
 				}
 			}
 			enable_extra_ram(st);
@@ -1742,6 +2051,9 @@ static void handlerambank(struct MemoryBank *mb, struct uaestate *st)
 static void processstate(struct uaestate *st)
 {
 	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
+
+	reset_cdtv(st);
+	reset_cd32(st);
 
 	reset_floppy(st);
 
@@ -1783,6 +2095,11 @@ static void processstate(struct uaestate *st)
 	set_cia(st->ciaa_chunk, 0);
 	set_cia(st->ciab_chunk, 1);
 
+	set_cdtv(st->cdtv_chunk, st);
+	set_cdtv_dmac(st->cdtv_dmac_chunk, st);
+
+	set_cd32(st->cd32_chunk, st);
+
 	if (st->debug_entry) {
 		// if statefile CPU > 68000 and statefile VBR != 0: directly modify original VBR
 		if (getlong(st->cpu_chunk, 0) > 68000) {
@@ -1810,13 +2127,13 @@ static void take_over(struct uaestate *st)
 	struct Process *me = (struct Process*)FindTask(0);
 	struct CommandLineInterface *cli = (struct CommandLineInterface*)((((ULONG)me->pr_CLI) << 2));
 	if (!cli) {
-		printf("CLI == NULL?\n");
+		printf("Program must be run from CLI.\n");
 		return;
 	}
 	ULONG *module = (ULONG*)(cli->cli_Module << 2);
 	ULONG hunksize = module[-1];
 
-	UBYTE *newcode = tempmem_allocate(hunksize + TEMP_STACK_SIZE + sizeof(struct uaestate), st);
+	UBYTE *newcode = tempmem_allocate(hunksize + TEMP_STACK_SIZE + sizeof(struct uaestate), TRUE, st);
 	if (!newcode) {
 		printf("Out of memory, %ld bytes required.\n", hunksize + TEMP_STACK_SIZE + sizeof(struct uaestate));
 		return;
@@ -1850,7 +2167,7 @@ static void take_over(struct uaestate *st)
 	
 	if (!st->nowait) {
 		if (st->debug) {
-			printf("Code=%08lx Stack=%08lx Data=%08lx. Press RETURN!\n", newcode, tempsp, tempst);
+			printf("HW=%d Code=%08lx Stack=%08lx Data=%08lx. Press RETURN!\n", st->hwtype, newcode, tempsp, tempst);
 		} else {
 			printf("Change floppy disk(s) now if needed. Press RETURN to start.\n");
 		}
@@ -1887,18 +2204,19 @@ int main(int argc, char *argv[])
 	
 	printf("ussload v" VER " (" REVDATE " " REVTIME ")\n");
 	if (argc < 2) {
-		printf("Syntax: ussload <statefile.uss> (parameters)\n");
+		printf("Syntax: ussload <statefile.uss> (parameters).\n");
 		printf("- nowait = don't wait for return key.\n");
 		printf("- debug = enable debug output.\n");
 		printf("- test = test mode.\n");
-		printf("- nomaprom = do not use map rom.\n");
+		printf("- nomaprom = do not use hardware map rom.\n");
 		printf("- mmu = use MMU (If 68030, MMU is not used by default).\n");
 		printf("- nommu = do not use MMU (68030/68040/68060).\n");
-		printf("- nocache = disable caches before starting (68020+)\n");
-		printf("- nocache2 = disable caches when taking over the system (68020+)\n");
-		printf("- pause = restore state, wait left mouse button press\n");
-		printf("- pal/ntsc = set PAL or NTSC mode (ECS/AGA only)\n");
-		printf("- nofloppy = don't initialize floppy drives\n");
+		printf("- nocache = disable caches before starting (68020+).\n");
+		printf("- nocache2 = disable caches when taking over the system (68020+).\n");
+		printf("- pause = restore state, wait left mouse button press.\n");
+		printf("- pal/ntsc = set PAL or NTSC mode (ECS/AGA only).\n");
+		printf("- nofloppy = don't initialize floppy drives.\n");
+		printf("- generic/cdtv/cd32 = override hardware type autodetection.\n");
 		return 0;
 	}
 	
@@ -1915,6 +2233,7 @@ int main(int argc, char *argv[])
 	}
 	st->usemaprom = 1;
 	st->canusemmu = 1;
+	st->hwtype = -1;
 	for(int i = 2; i < argc; i++) {
 		if (!stricmp(argv[i], "debug"))
 			st->debug = 1;
@@ -1940,6 +2259,12 @@ int main(int argc, char *argv[])
 			st->flags |= FLAGS_PAUSE;
 		if (!stricmp(argv[i], "nofloppy"))
 			st->flags |= FLAGS_NOFLOPPY;
+		if (!stricmp(argv[i], "generic"))
+			st->hwtype = HWTYPE_GENERIC;
+		if (!stricmp(argv[i], "cdtv"))
+			st->hwtype = HWTYPE_CDTV;
+		if (!stricmp(argv[i], "cd32"))
+			st->hwtype = HWTYPE_CD32;
 		if (!stricmp(argv[i], "trap")) {
 			if (i + 1 < argc) {
 				char *p;
@@ -1957,6 +2282,7 @@ int main(int argc, char *argv[])
 	}
 	
 	UWORD attnFlags = SysBase->AttnFlags;
+	st->attnflags = attnFlags;
 
 	if ((attnFlags & AFF_68030) && !(attnFlags & AFF_68040) && st->canusemmu == 1) {
 		st->canusemmu = 0;
@@ -1977,6 +2303,8 @@ int main(int argc, char *argv[])
 	}
 	
 	has_maprom(st);
+	
+	detect_type(st);
 	
 	has_debugger(st, FALSE);
 	

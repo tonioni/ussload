@@ -34,6 +34,7 @@ struct MemoryBank
 #define MAPROM_GVP 5
 #define MAPROM_BLIZZARD12x0 6
 #define MAPROM_ACA1233N 7
+#define MAPROM_ACA1221LC 8
 #define MAPROM_MMU 255
 
 #define FLAGS_NOCACHE 1
@@ -49,7 +50,8 @@ struct mapromdata
 	ULONG config;
 	ULONG addr;
 	APTR board;
-	ULONG memunavailable;
+	UBYTE *memunavailable_start;
+	UBYTE *memunavailable_end;
 };
 
 #define MAX_EXTRARAM 4
@@ -62,6 +64,10 @@ struct extraram
 	struct MemHeader *head;
 };
 
+#define HWTYPE_GENERIC 0
+#define HWTYPE_CDTV 1
+#define HWTYPE_CD32 2
+
 struct uaestate
 {
 	ULONG flags;
@@ -73,6 +79,8 @@ struct uaestate
 	UBYTE *floppy_chunk[4];
 	UBYTE *audio_chunk[4];
 	UBYTE *sprite_chunk[8];
+	UBYTE *cd32_chunk;
+	UBYTE *cdtv_chunk, *cdtv_dmac_chunk;
 	ULONG *MMU_Level_A;
 	UBYTE *vbr;
 	UBYTE *debug_entry;
@@ -92,6 +100,8 @@ struct uaestate
 
 	struct extraram eram[MAX_EXTRARAM];
 	
+	WORD hwtype;
+	UWORD attnflags;
 	WORD mmutype;
 	UBYTE *page_ptr;
 	ULONG page_free;
