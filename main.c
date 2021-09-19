@@ -1,8 +1,8 @@
 
 /* Real hardware UAE state file loader */
-/* Copyright 2019-2020 Toni Wilen */
+/* Copyright 2019-2021 Toni Wilen */
 
-#define VER "2.1"
+#define VER "2.2"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -454,7 +454,9 @@ static void set_sprite(UBYTE *p, ULONG num)
 static void set_custom(struct uaestate *st)
 {
 	volatile UWORD *c = (volatile UWORD*)0xdff000;
+	volatile struct Custom *custom = (volatile struct Custom*)0xdff000;
 	UBYTE *p = st->custom_chunk;
+	UWORD v;
 	p += 4;
 	for (WORD i = 0; i < 0x1fe; i += 2, c++) {
 
@@ -520,7 +522,7 @@ static void set_custom(struct uaestate *st)
 			continue;
 		}
 
-		UWORD v = getword(p, 0);
+		v = getword(p, 0);
 		p += 2;
 
 		// diwhigh
@@ -544,20 +546,33 @@ static void set_custom(struct uaestate *st)
 		if (i == 0x9e) {
 			v |= 0x8000;
 		}
-
+		
 		*c = v;
 	}
+
+	// VPOSW, set LOF if different
+	v = getword(p, 4 + 0x04) & 0x8000;
+	if ((custom->vposr & 0x8000) != (v & 0x8000)) {
+		for (;;) {
+			// only change LOF when it is safe
+			UWORD v1 = custom->vhposr & 0xff00;
+			if (v1 >= 0x8000 && v1 < 0xf000) {
+				custom->vposw = (v & 0x8000) | (custom->vposr & 7);
+				break;
+			}
+		}
+	}
+	
 }
 
-void set_custom_final(UBYTE *p)
+UWORD set_custom_final(UBYTE *p)
 {
 	volatile struct Custom *c = (volatile struct Custom*)0xdff000;
 	c->intena = 0x7fff;
 	c->intreq = 0x7fff;
-	c->vposw = (getword(p, 4 + 0x04) & 0x8000) | (c->vposr & 7); // set LOF
-	c->dmacon = (getword(p, 4 + 0x96) & ~15) | 0x8000;
 	c->intena = getword(p, 4 + 0x9a) | 0x8000;
 	c->intreq = getword(p, 4 + 0x9c) | 0x8000;
+	return (getword(p, 4 + 0x96) & ~15) | 0x8000;
 }
 
 static void set_cia(UBYTE *p, ULONG num)
@@ -947,6 +962,26 @@ static void set_maprom(struct uaestate *st)
 		}
 		// maprom on
 		base[0x08 / 2] = 0xffff;
+		// lock
+		base[0x00 / 2] = 0xffff;
+	}
+	if (mrd->type == MAPROM_ACA1234) {
+		volatile UBYTE *base = (volatile UBYTE*)mrd->board;
+		ULONG mapromaddr = mrd->addr;
+		// unlock
+		base[0x7e] = 0;
+		base[0x7e] = 30;
+		base[0x7e] = 4;
+		base[0x7e] = 20;
+		base[0x7e] = 13;
+		// maprom off
+		base[0x9c] = 0;
+		copyrom(mapromaddr, st);
+		copyrom(mapromaddr + 524288, st);
+		// maprom on
+		base[0x9e] = 0x42;
+		// lock
+		base[0x7e] = 0xff;
 	}
 	if (mrd->type == MAPROM_GVP) {
 		copyrom(mrd->addr, st);
@@ -1137,6 +1172,11 @@ static BOOL has_maprom_aca(struct uaestate *st)
 		mrd->addr = 0x47f00000;
 		mrd->board = (APTR)0x47e8f000;
 		mrd->config = 0;
+	} else if (FindConfigDev(0, 0x1212, 28)) {
+		// ACA1234
+		mrd->type = MAPROM_ACA1234;
+		mrd->addr = 0x47f00000;
+		mrd->board = (APTR)0xe90000;
 	} else if (FindConfigDev(0, 0x1212, 32) || FindConfigDev(0, 0x1212, 72)) {
 		// ACA1233n 68EC020
 		if ((ULONG)has_maprom_aca >= 0x200000) {

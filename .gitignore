@@ -1,0 +1,8 @@
+*.uss
+*.o
+*.a500
+*.a1200
+*.lha
+*.zip
+hrtmon*
+ussload

@@ -35,6 +35,7 @@ struct MemoryBank
 #define MAPROM_BLIZZARD12x0 6
 #define MAPROM_ACA1233N 7
 #define MAPROM_ACA1221LC 8
+#define MAPROM_ACA1234 9
 #define MAPROM_MMU 255
 
 #define FLAGS_NOCACHE 1

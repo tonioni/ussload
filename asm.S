@@ -15,6 +15,8 @@ MMU_TABLE = CDTV_DMAC_CHUNK+4
 VBR_TABLE = MMU_TABLE+4
 DEBUG_ENTRY = VBR_TABLE+4
 
+WAITLINES = 15
+
 	.text
 	.globl _runit
 	.globl _killsystem
@@ -217,8 +219,8 @@ _runit:
 .nofpu:	
 	
 	| find last line
-	moveq #0,d5
-	lea 0x6(a6),a2
+	moveq #0,d4
+	lea 6(a6),a2
 .wait1:
 	cmp.b #250,(a2)
 	bne.s .wait1
@@ -230,18 +232,18 @@ _runit:
 	btst #0,d0
 	beq.s .wait1c
 	move.b (a2),d0
-	cmp.b d0,d5
+	cmp.b d0,d4
 	bcc.s .wait1b
-	move.b d0,d5
+	move.b d0,d4
 	bra.s .wait1b
 .wait1c:
 	cmp.b #160,(a2)
 	bne.s .wait1c
 
-	| last line - 15
-	sub.b #15,d5
+	| last line - WAITLINES
+	sub.b #WAITLINES,d4
 .wait3:
-	cmp.b (a2),d5
+	cmp.b (a2),d4
 	bne.s .wait3
 
 	| debug trigger
@@ -263,33 +265,52 @@ _runit:
 	bsr _set_cia_final
 	move.l CUSTOM_CHUNK(a4),(sp)
 	bsr _set_custom_final
+	move.w d0,d5
 
 	| pause
 	btst #3,3(a4)
 	beq.s .pausemode2
-
 	btst #0,1(a4) | 68010+?
 	beq.s .pausevbr
 	move.l VBR_TABLE(a4),d0
 	beq.s .pausevbr
 	movec d0,VBR
 .pausevbr:
-
+.wait4:
+	tst.b (a2)
+	bne.s .wait4
+	move.w d5,0x96(a6)
 .pausemode3:
 	btst #6,0xbfe001
 	bne.s .pausemode3
 	| debounce delay
 .pausemode4:
-	cmp.b 6(a6),d5
+	cmp.b 6(a6),d4
 	bne.s .pausemode4
-	subq.b #1,d5
+	subq.b #1,d4
 .pausemode5:
-	cmp.b 6(a6),d5
+	cmp.b 6(a6),d4
 	bne.s .pausemode5
-	addq.b #1,d5
+	addq.b #1,d4
 	btst #6,0xbfe001
 	beq.s .pausemode4
-	bsr begin_audio	
+	lea 1(a2),a0
+	move.b d4,d0
+	add.b #WAITLINES,d0
+.wait4b:
+	cmp.b (a2),d0
+	bne.s .wait4b
+.wait4e:
+	cmp.b #0xa0,(a0)
+	bcs.s .wait4e
+	move.w #0x1f0,0x96(a6)
+.wait4c:
+	cmp.b #160,(a2)
+	bne.s .wait4c
+.wait4d:
+	cmp.b (a2),d4
+	bne.s .wait4d
+	bsr begin_audio
 .pausemode2:
 
 	| restore CPU state
@@ -373,19 +394,23 @@ _runit:
 	| PC, SR, registers
 	move.l 4+4+60(a0),-(sp) | PC
 	move.w 4+4+60+4+2+2+4+4(a0),-(sp) | SR
-	movem.l 4+4(a0),d0-d5
+	movem.l 4+4(a0),d0-d4
 	movem.l 4+4+8*4+4+4(a0),a2-a6
-	add.w #4+4+6*4,a0
+	add.w #4+4+5*4,a0
 
 	| debug trigger
 	| move.w #0x1234,0xef0000
 
 	lea 0xbfde00,a1
 
-	| wait last line
+	| wait until beginning of first line
 .wait2:
 	tst.b 0xdff006
 	bne.s .wait2
+
+	| enable DMA (except audio which was already enabled)
+	| enable last because program's copper list might modify copper pointer or blitter registers
+	move.w d5,0xdff096
 
 	| start timers
 	move.b d6,0xbfee01-0xbfde00(a1)
@@ -396,7 +421,7 @@ _runit:
 	move.b d7,0x100(a1)
 	
 	| restore remaining registers
-	movem.l (a0),d6-d7/a0-a1
+	movem.l (a0),d5-d7/a0-a1
 	
 	rte | GO! GO! GO!
 
@@ -463,9 +488,10 @@ begin_audio:
 	| enable audio DMA
 	move.w d0,0x96(a6)
 	| wait few lines, enough time for audio channels to enter normal 2/3 states
-	addq.b #4,d5
+	move.b d4,d0
+	addq.b #4,d0
 .audwait:
-	cmp.b (a2),d5
+	cmp.b (a2),d0
 	bne.s .audwait
 	| restore latched AUDxLEN and AUDxPT
 	move.l a4,-(sp)

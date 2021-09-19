@@ -1,6 +1,11 @@
 
 ussload is UAE state save file (*.uss) loader designed for real hardware.
 
+v2.2:
+
+- Compatibility improved.
+- ACA1234 Map ROM support added.
+
 v2.1:
 
 - Accept CD32 state files. Akiko and CD audio playback state
@@ -81,8 +86,8 @@ A1200 chip ram only state files usually require at least 1M Fast ram.
 
 Map ROM hardware support:
 
-ACA500, ACA500plus, ACA1221, ACA1221EC, ACA1221LC, ACA1233n and most
-ACA123x variants. GVP A530, A2000 and A3000 G-Force models.
+ACA500, ACA500plus, ACA1221, ACA1221EC, ACA1221LC, ACA1233n, ACA1234
+and most ACA123x variants. GVP A530, A2000 and A3000 G-Force models.
 Blizzard 1230 MKI/MKII/MKIII/MKIV, 1240, 1260.
 
 Map ROM hardware is not used or needed in MMU mode.
